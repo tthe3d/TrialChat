@@ -702,6 +702,7 @@ local function showMinimapTooltip(button)
         chatWindow and chatWindow:IsShown() and "Click to hide TrialChat."
             or "Click to show TrialChat.",
         1, 1, 1)
+    GameTooltip:AddLine("Right-click for group chats.", 0.7, 0.7, 0.7)
     GameTooltip:AddLine("Drag to move this button.", 0.7, 0.7, 0.7)
     GameTooltip:Show()
 end
@@ -723,7 +724,7 @@ local function createMinimapButton()
     minimapButton:SetSize(31, 31)
     minimapButton:SetFrameStrata("MEDIUM")
     minimapButton:SetFrameLevel(Minimap:GetFrameLevel() + 5)
-    minimapButton:RegisterForClicks("LeftButtonUp")
+    minimapButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     minimapButton:RegisterForDrag("LeftButton")
 
     minimapButton.icon = minimapButton:CreateTexture(nil, "ARTWORK")
@@ -738,7 +739,12 @@ local function createMinimapButton()
     border:SetPoint("TOPLEFT", minimapButton, "TOPLEFT", 0, 0)
     border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
 
-    minimapButton:SetScript("OnClick", function()
+    minimapButton:SetScript("OnClick", function(_, button)
+        if button == "RightButton" then
+            TrialChatGroups:ToggleMenu(minimapButton)
+            return
+        end
+
         if chatWindow:IsShown() then
             chatWindow:Hide()
         else
