@@ -6,7 +6,9 @@ How to use:
 
 For trial players.
 Type /tc to enable or click the minimap button.
+
 Type anything in /s or /p chat.
+
 Type /tc to disable or click the minimap button.
 
 For paid players.
