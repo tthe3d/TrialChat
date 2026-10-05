@@ -1,18 +1,10 @@
-This add-on is still in the making. It allows trial characters in World of Warcraft Retail to talk to other players that have the add-on. 
-
-
+This add-on is still in the making. It allows trial characters in World of Warcraft Retail to talk to other nearby players (if they have the add-on).
 
 How to use:
 
-For trial players:
-Type /tc to enable or click the minimap button.
+Type /tc to show/hide or click the mini-map button.
 
-Type anything in /s or /p chat.
-
-Type /tc to disable or click the minimap button.
+Can add permanent active listeners in case you wanna go some other zone and still talk.
 
 
-
-For paid players:
-
-You don't have to do anything, the add-on acts as a receiver only.
+<img width="500" height="325" alt="Screenshot 2026-10-05 at 21 45 44" src="https://github.com/user-attachments/assets/8bac1a11-3fd9-4993-97ee-33ae4f19aef6" />
