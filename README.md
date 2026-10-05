@@ -11,5 +11,8 @@ Type anything in /s or /p chat.
 
 Type /tc to disable or click the minimap button.
 
+
+
 For paid players.
+
 You don't have to do anything, the add-on acts as a receiver only.
