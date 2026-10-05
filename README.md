@@ -1,4 +1,4 @@
-This add-on is still in the making. It to allows trial characters in World of Warcraft Retail to talk to other players that have the add-on. 
+This add-on is still in the making. It allows trial characters in World of Warcraft Retail to talk to other players that have the add-on. 
 
 
 
