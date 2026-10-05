@@ -1,8 +1,8 @@
 ## Interface: 120100
 ## Title: TrialChat
-## Notes: Addon chat for nearby players and groups. All participants need TrialChat installed.
+## Notes: TrialChat includes a chat window and permanent listener list. Use /tc to open it.
 ## Author: AI Peer
-## Version: 1.2
+## Version: 2.5
 ## SavedVariables: TrialChatDB
 ## IconTexture: Interface\AddOns\TrialChat\broke
 
