@@ -1,4 +1,5 @@
 local PREFIX = "TrialChat"
+_G.BINDING_CATEGORY_TRIALCHAT = "TrialChat"
 local MESSAGE_TAG = "M:"
 local PING = "C:PING"
 local PONG = "C:PONG"
@@ -27,6 +28,7 @@ local chatLog
 local chatInput
 local openChatWindow
 local sendTrialChatMessage
+local showTrialChatNotice
 local slashOpenHooks = {}
 local recipientList
 local recipientRows = {}
@@ -41,8 +43,53 @@ local listenersExpanded = false
 local updateRecipientList
 local updateChatContentLayout
 local RECIPIENT_ROW_HEIGHT = 18
+local CHAT_WINDOW_IDLE_ALPHA = 0.45
+local CHAT_MESSAGE_VISIBLE_SECONDS = 10
+local lastChatMessageAt
 if fullPlayerName and playerRealm and playerRealm ~= "" then
     fullPlayerName = fullPlayerName .. "-" .. playerRealm
+end
+
+local function updateChatWindowAlpha()
+    if not chatWindow then return end
+
+    local mouseOverChat = chatWindow:IsShown() and chatWindow:IsMouseOver()
+    local mouseOverListeners = recipientPanel
+        and recipientPanel:IsShown()
+        and recipientPanel:IsMouseOver()
+    local inputHasFocus = (chatInput and chatInput:HasFocus())
+        or (addListenerInput and addListenerInput:HasFocus())
+    local recentMessage = lastChatMessageAt
+        and GetTime() - lastChatMessageAt < CHAT_MESSAGE_VISIBLE_SECONDS
+    local alpha = (mouseOverChat or mouseOverListeners or inputHasFocus or recentMessage)
+        and 1 or CHAT_WINDOW_IDLE_ALPHA
+
+    chatWindow:SetAlpha(alpha)
+    if recipientPanel then
+        recipientPanel:SetAlpha(alpha)
+    end
+end
+
+local function noteChatMessage()
+    lastChatMessageAt = GetTime()
+    updateChatWindowAlpha()
+    C_Timer.After(CHAT_MESSAGE_VISIBLE_SECONDS, updateChatWindowAlpha)
+end
+
+local function saveChatWindowSettings()
+    if not chatWindow then return end
+
+    local centerX, centerY = chatWindow:GetCenter()
+    local parentWidth, parentHeight = UIParent:GetSize()
+    if not centerX or not centerY or parentWidth <= 0 or parentHeight <= 0 then return end
+
+    TrialChatDB = TrialChatDB or {}
+    TrialChatDB.chatWindow = {
+        width = chatWindow:GetWidth(),
+        height = chatWindow:GetHeight(),
+        centerX = centerX / parentWidth,
+        centerY = centerY / parentHeight,
+    }
 end
 
 local function normalizeName(name)
@@ -140,7 +187,7 @@ local function getGroupMembers()
         local unit = unitPrefix .. index
         local name = getFullName(unit)
         if name then
-            members[normalizeName(name)] = true
+            members[normalizeName(name)] = name
             local shortName = string.match(name, "^([^-]+)")
             shortNames[normalizeName(shortName)] = true
             rememberUnitClass(unit, name)
@@ -313,6 +360,7 @@ local function printMessage(label, sender, message, color, nameColor)
     local line = color .. "[" .. label .. "] " .. nameColor .. sender .. "|r:|r " .. message
     if openChatWindow then
         openChatWindow(false)
+        noteChatMessage()
         chatLog:AddMessage(line)
         chatLog:ScrollToBottom()
     else
@@ -373,18 +421,36 @@ local function createChatWindow()
 
     TrialChatDB = TrialChatDB or {}
     chatWindow = CreateFrame("Frame", "TrialChatWindow", UIParent, "BackdropTemplate")
-    chatWindow:SetSize(420, 420)
-    chatWindow:SetPoint("CENTER")
+    local savedSettings = TrialChatDB.chatWindow
+    local width = type(savedSettings) == "table" and tonumber(savedSettings.width) or 420
+    local height = type(savedSettings) == "table" and tonumber(savedSettings.height) or 420
+    width = math.max(320, math.min(900, width or 420))
+    height = math.max(320, math.min(900, height or 420))
+    chatWindow:SetSize(width, height)
     chatWindow:SetFrameStrata("DIALOG")
     chatWindow:SetFrameLevel(100)
-    chatWindow:SetClampedToScreen(true)
     chatWindow:SetMovable(true)
     chatWindow:SetResizable(true)
     chatWindow:SetResizeBounds(320, 320, 900, 900)
+    chatWindow:SetClampedToScreen(true)
+    local centerX = type(savedSettings) == "table" and tonumber(savedSettings.centerX)
+    local centerY = type(savedSettings) == "table" and tonumber(savedSettings.centerY)
+    if centerX and centerY then
+        local parentWidth, parentHeight = UIParent:GetSize()
+        chatWindow:SetPoint("CENTER", UIParent, "BOTTOMLEFT",
+            centerX * parentWidth, centerY * parentHeight)
+    else
+        chatWindow:SetPoint("CENTER")
+    end
     chatWindow:EnableMouse(true)
     chatWindow:RegisterForDrag("LeftButton")
     chatWindow:SetScript("OnDragStart", chatWindow.StartMoving)
-    chatWindow:SetScript("OnDragStop", chatWindow.StopMovingOrSizing)
+    chatWindow:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        saveChatWindowSettings()
+    end)
+    chatWindow:HookScript("OnEnter", updateChatWindowAlpha)
+    chatWindow:HookScript("OnLeave", updateChatWindowAlpha)
     chatWindow:SetBackdrop({
         bgFile = "Interface/Tooltips/UI-Tooltip-Background",
         edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
@@ -394,6 +460,7 @@ local function createChatWindow()
         insets = { left = 4, right = 4, top = 4, bottom = 4 },
     })
     chatWindow:SetBackdropColor(0.04, 0.04, 0.04, 0.95)
+    chatWindow:SetAlpha(CHAT_WINDOW_IDLE_ALPHA)
 
     local title = chatWindow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     title:SetPoint("TOP", chatWindow, "TOP", 0, -12)
@@ -419,6 +486,9 @@ local function createChatWindow()
     recipientPanel:SetWidth(170)
     recipientPanel:SetFrameStrata("DIALOG")
     recipientPanel:SetFrameLevel(100)
+    recipientPanel:EnableMouse(true)
+    recipientPanel:HookScript("OnEnter", updateChatWindowAlpha)
+    recipientPanel:HookScript("OnLeave", updateChatWindowAlpha)
     recipientPanel:SetBackdrop({
         bgFile = "Interface/Tooltips/UI-Tooltip-Background",
         edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
@@ -428,6 +498,7 @@ local function createChatWindow()
         insets = { left = 3, right = 3, top = 3, bottom = 3 },
     })
     recipientPanel:SetBackdropColor(0.02, 0.02, 0.02, 0.75)
+    recipientPanel:SetAlpha(CHAT_WINDOW_IDLE_ALPHA)
 
     recipientTitle = recipientPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     recipientTitle:SetPoint("TOP", recipientPanel, "TOP", 0, -8)
@@ -479,23 +550,25 @@ local function createChatWindow()
     addListenerInput:SetPoint("BOTTOMLEFT", recipientPanel, "BOTTOMLEFT", 8, 8)
     addListenerInput:SetAutoFocus(false)
     addListenerInput:SetMaxLetters(64)
+    addListenerInput:HookScript("OnEditFocusGained", updateChatWindowAlpha)
+    addListenerInput:HookScript("OnEditFocusLost", updateChatWindowAlpha)
     addListenerInput:SetScript("OnEnterPressed", function(self)
         local name = strtrim(self:GetText() or "")
         if name == "" then return end
 
         if isSelf(name) then
-            print("|cffff3333[TrialChat] You are already in the listener list.|r")
+            showTrialChatNotice("|cffff3333[TrialChat] You are already in the listener list.|r")
             return
         end
         if string.find(name, "[%c%s|]") then
-            print("|cffff3333[TrialChat] Enter a character name, optionally followed by -Realm.|r")
+            showTrialChatNotice("|cffff3333[TrialChat] Enter a character name, optionally followed by -Realm.|r")
             return
         end
 
         local key = normalizeName(name)
         local permanentListeners = getPermanentListeners()
         if permanentListeners[key] then
-            print("|cffff3333[TrialChat] That listener is already saved.|r")
+            showTrialChatNotice("|cffff3333[TrialChat] That listener is already saved.|r")
             return
         end
 
@@ -528,6 +601,7 @@ local function createChatWindow()
         if listenersExpanded then
             recipientPanel:Show()
         end
+        updateChatWindowAlpha()
     end)
     chatWindow:SetScript("OnHide", function()
         recipientPanel:Hide()
@@ -542,7 +616,9 @@ local function createChatWindow()
         self:GetParent():StartSizing("BOTTOMRIGHT")
     end)
     resizeGrip:SetScript("OnMouseUp", function(self)
-        self:GetParent():StopMovingOrSizing()
+        local frame = self:GetParent()
+        frame:StopMovingOrSizing()
+        saveChatWindowSettings()
     end)
 
     chatLog = CreateFrame("ScrollingMessageFrame", nil, chatWindow)
@@ -562,6 +638,8 @@ local function createChatWindow()
     chatInput = CreateFrame("EditBox", nil, chatWindow, "InputBoxTemplate")
     chatInput:SetAutoFocus(false)
     chatInput:SetMaxLetters(MAX_MESSAGE_BYTES)
+    chatInput:HookScript("OnEditFocusGained", updateChatWindowAlpha)
+    chatInput:HookScript("OnEditFocusLost", updateChatWindowAlpha)
     chatInput:SetScript("OnEnterPressed", function(self)
         local message = self:GetText()
         self:SetText("")
@@ -586,6 +664,13 @@ openChatWindow = function(focusInput)
     if focusInput then
         chatInput:SetFocus()
     end
+    updateChatWindowAlpha()
+end
+
+showTrialChatNotice = function(message)
+    openChatWindow(false)
+    chatLog:AddMessage(message)
+    chatLog:ScrollToBottom()
 end
 
 local function hookSlashOpenShortcut()
@@ -791,12 +876,12 @@ end)
 sendTrialChatMessage = function(msg)
     msg = strtrim(msg or "")
     if msg == "" then
-        print("|cffff3333[TrialChat] Enter a message to send with /tc.|r")
+        showTrialChatNotice("|cffff3333[TrialChat] Enter a message to send with /tc.|r")
         return
     end
 
     if #msg > MAX_MESSAGE_BYTES then
-        print("|cffff3333[TrialChat] Message is too long (maximum 240 bytes).|r")
+        showTrialChatNotice("|cffff3333[TrialChat] Message is too long (maximum 240 bytes).|r")
         return
     end
 
@@ -804,11 +889,13 @@ sendTrialChatMessage = function(msg)
     local classPayload = playerClass and RAID_CLASS_COLORS[playerClass]
         and CLASS_TAG .. playerClass or nil
     local sentToGroup = IsInGroup()
+    local inRaid = IsInRaid()
     local sentWhisperCount = 0
+    local sentNearbyWhisperCount = 0
     local groupMembers, groupShortNames = getGroupMembers()
 
-    if sentToGroup then
-        local groupChannel = IsInRaid() and "RAID" or "PARTY"
+    if sentToGroup and not inRaid then
+        local groupChannel = "PARTY"
         if classPayload then
             C_ChatInfo.SendAddonMessage(PREFIX, classPayload, groupChannel)
         end
@@ -835,31 +922,43 @@ sendTrialChatMessage = function(msg)
         end
     end
 
+    if inRaid then
+        for targetKey, targetPlayer in pairs(groupMembers) do
+            if not isSelf(targetPlayer) then
+                sendTargets[targetKey] = targetPlayer
+            end
+        end
+    end
+
     for targetKey, targetPlayer in pairs(sendTargets) do
         local shortName = string.match(targetPlayer, "^([^-]+)")
         local isGroupMember = groupMembers[targetKey]
             or (not string.find(targetPlayer, "-", 1, true) and groupShortNames[normalizeName(shortName)])
-        if not isGroupMember then
-            if classPayload then
+        if not isGroupMember or inRaid then
+            if classPayload and not (inRaid and isGroupMember) then
                 C_ChatInfo.SendAddonMessage(PREFIX, classPayload, "WHISPER", targetPlayer)
             end
             C_ChatInfo.SendAddonMessage(PREFIX, payload, "WHISPER", targetPlayer)
             sentWhisperCount = sentWhisperCount + 1
+            if not isGroupMember then
+                sentNearbyWhisperCount = sentNearbyWhisperCount + 1
+            end
         end
     end
 
     local myShortName = string.match(playerName, "^([^-]+)") or playerName
     local myNameColor = getClassColor(playerClass)
-    if sentToGroup and sentWhisperCount > 0 then
-        printMessage(IsInRaid() and "Raid + Nearby" or "Party + Nearby",
+    if sentToGroup and sentNearbyWhisperCount > 0 then
+        printMessage(inRaid and "Raid + Nearby" or "Party + Nearby",
             myShortName, msg, "|cffff7d0a", myNameColor)
     elseif sentToGroup then
-        printMessage(IsInRaid() and "Raid" or "Party", myShortName, msg, "|cffff7d0a", myNameColor)
+        printMessage(inRaid and "Raid" or "Party", myShortName, msg, "|cffff7d0a", myNameColor)
     elseif sentWhisperCount > 0 then
         printMessage("Nearby", myShortName, msg, "|cffffcc00", myNameColor)
     else
         printMessage("Nearby", myShortName, msg, "|cffffcc00", myNameColor)
-        print("|cffff7d0aBut nobody heard that, because there are no players using TrialChat around.|r")
+        showTrialChatNotice(
+            "|cffff7d0aBut nobody heard that, because there are no players using TrialChat around.|r")
     end
     updateRecipientList()
 end
@@ -876,9 +975,23 @@ SlashCmdList["TRIALCHAT"] = function(msg)
     sendTrialChatMessage(msg)
 end
 
+BINDING_NAME_TRIALCHAT_OPEN = "Open TrialChat and focus chat"
+
+function TrialChat_Open()
+    C_Timer.After(0, function()
+        openChatWindow(true)
+    end)
+end
+
 local hookFrame = CreateFrame("Frame")
 hookFrame:RegisterEvent("PLAYER_LOGIN")
-hookFrame:SetScript("OnEvent", function()
+hookFrame:RegisterEvent("PLAYER_LOGOUT")
+hookFrame:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_LOGOUT" then
+        saveChatWindowSettings()
+        return
+    end
+
     createChatWindow()
     createMinimapButton()
     hookSlashOpenShortcut()

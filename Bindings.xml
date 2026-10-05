@@ -1,0 +1,5 @@
+<Bindings>
+    <Binding name="TRIALCHAT_OPEN" category="BINDING_CATEGORY_TRIALCHAT">
+        TrialChat_Open()
+    </Binding>
+</Bindings>

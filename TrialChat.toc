@@ -2,8 +2,9 @@
 ## Title: TrialChat
 ## Notes: TrialChat includes a chat window and permanent listener list. Use /tc to open it.
 ## Author: AI Peer
-## Version: 2.5
+## Version: 2.7
 ## SavedVariables: TrialChatDB
 ## IconTexture: Interface\AddOns\TrialChat\broke
 
 TrialChat.lua
+Bindings.xml
