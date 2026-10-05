@@ -1,0 +1,9 @@
+## Interface: 120100
+## Title: TrialChat
+## Notes: Addon chat for nearby players and groups. All participants need TrialChat installed.
+## Author: AI Peer
+## Version: 1.2
+## SavedVariables: TrialChatDB
+## IconTexture: Interface\AddOns\TrialChat\broke
+
+TrialChat.lua
