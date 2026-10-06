@@ -206,12 +206,14 @@ local function renderGroupMessage(session, entry)
     local member = memberKey and session.members[memberKey]
     local nameColor = entry.isEmote and "|cffff7d0a"
         or getClassColor(member and member.classFile) or "|cffffcc00"
-    local timestamp = "|cffaaaaaa[" .. date("%H:%M", entry.timestamp) .. "]|r "
+    local timestampColor = entry.isEmote and "|cffff7d0a" or "|cffaaaaaa"
+    local timestamp = timestampColor
+        .. "[" .. date("%H:%M", entry.timestamp) .. "]|r "
     local senderText = nameColor .. shortSender .. "|r"
     local displayMessage = TrialChatCommon.FormatMessageText(entry.message)
     if entry.isEmote then
         return timestamp .. senderText .. " "
-            .. displayMessage .. "|r"
+            .. "|cffff7d0a" .. displayMessage .. "|r"
     end
     return timestamp .. senderText .. ": " .. displayMessage
 end
