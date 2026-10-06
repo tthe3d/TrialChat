@@ -22,6 +22,7 @@ local pendingPings = {}
 local pendingIncomingMessages = {}
 local playerName = UnitName("player")
 local fullPlayerName, playerRealm = UnitFullName("player")
+local normalizedPlayerRealm = GetNormalizedRealmName and GetNormalizedRealmName()
 local _, playerClass = UnitClass("player")
 local classByName = {}
 local minimapButton
@@ -201,8 +202,19 @@ end
 local function isSelf(sender)
     local senderKey = normalizeName(sender)
     if senderKey == normalizeName(fullPlayerName) then return true end
-    return not string.find(sender, "-", 1, true)
-        and normalizeName(sender) == normalizeName(playerName)
+    local senderName, senderRealm = string.match(sender, "^([^-]+)%-(.+)$")
+    if not senderName then
+        return normalizeName(sender) == normalizeName(playerName)
+    end
+    if normalizeName(senderName) ~= normalizeName(playerName) then return false end
+
+    local currentRealm = normalizedPlayerRealm or playerRealm
+    if not currentRealm or currentRealm == "" then return false end
+
+    local function normalizeRealm(realm)
+        return normalizeName(string.gsub(realm, "[%s']", ""))
+    end
+    return normalizeRealm(senderRealm) == normalizeRealm(currentRealm)
 end
 
 local function getGroupMembers()

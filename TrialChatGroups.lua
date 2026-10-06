@@ -232,7 +232,8 @@ local function rebuildGroupLog(session)
 end
 
 local function addGroupMessage(
-    session, sender, message, isEmote, messageId, timestamp, isHistorical)
+    session, sender, message, isEmote, messageId, timestamp, isHistorical,
+    shouldNotify)
     if isHistorical then
         addKnownMember(session, sender)
     else
@@ -252,6 +253,10 @@ local function addGroupMessage(
         messageId = makeMessageId(sender, session.messageCounter)
     end
     timestamp = timestamp or GetServerTime()
+
+    if shouldNotify then
+        PlaySound(SOUNDKIT.TELL_MESSAGE)
+    end
 
     local entry = {
         id = messageId,
@@ -1486,7 +1491,7 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
         timestamp = tonumber(timestamp)
         if messageId and timestamp then
             addGroupMessage(session, sender, text,
-                emoteFlag == "E", messageId, timestamp)
+                emoteFlag == "E", messageId, timestamp, false, true)
         end
         return
     end
@@ -1494,7 +1499,8 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
     if (kind == "MSG" or kind == "EMOTE")
         and session and hasMember(session, sender) then
         local decodedBody = TrialChatCommon.DecodeMessageMarkup(body)
-        addGroupMessage(session, sender, decodedBody, kind == "EMOTE")
+        addGroupMessage(session, sender, decodedBody, kind == "EMOTE",
+            nil, nil, false, true)
         return
     end
 
