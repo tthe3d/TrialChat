@@ -1,10 +1,12 @@
 local PREFIX = "TrialChat"
 _G.BINDING_HEADER_TRIALCHAT = "TrialChat"
 local MESSAGE_TAG = "M:"
+local EMOTE_TAG = "E:"
 local PING = "C:PING"
 local PONG = "C:PONG"
 local CLASS_TAG = "C:CLASS:"
-local MAX_MESSAGE_BYTES = 240
+local MAX_MESSAGE_BYTES = 253
+local MAX_CHAT_HISTORY = 200
 local LISTENER_TIMEOUT = 35
 local PING_INTERVAL = 30
 local PING_BUDGET = 4
@@ -74,6 +76,22 @@ local function noteChatMessage()
     lastChatMessageAt = GetTime()
     updateChatWindowAlpha()
     C_Timer.After(CHAT_MESSAGE_VISIBLE_SECONDS, updateChatWindowAlpha)
+end
+
+local function getChatHistory()
+    TrialChatDB = TrialChatDB or {}
+    if type(TrialChatDB.chatHistory) ~= "table" then
+        TrialChatDB.chatHistory = {}
+    end
+    return TrialChatDB.chatHistory
+end
+
+local function saveChatHistoryLine(line)
+    local history = getChatHistory()
+    history[#history + 1] = line
+    while #history > MAX_CHAT_HISTORY do
+        table.remove(history, 1)
+    end
 end
 
 local function saveChatWindowSettings()
@@ -361,10 +379,16 @@ updateChatContentLayout = function()
     chatInput:SetPoint("BOTTOMRIGHT", chatWindow, "BOTTOMRIGHT", -14, 14)
 end
 
-local function printMessage(label, sender, message, color, nameColor)
-    message = string.gsub(message, "|", "||")
-    nameColor = nameColor or color
-    local line = color .. "[" .. label .. "] " .. nameColor .. sender .. "|r:|r " .. message
+local function printMessage(sender, message, color, nameColor, isEmote)
+    message = TrialChatCommon.FormatMessageText(message)
+    nameColor = isEmote and color or nameColor or color
+    local line = color .. "[" .. date("%H:%M") .. "] " .. nameColor .. sender
+    if isEmote then
+        line = line .. " " .. message .. "|r"
+    else
+        line = line .. "|r:|r " .. message
+    end
+    saveChatHistoryLine(line)
     if openChatWindow then
         openChatWindow(false)
         noteChatMessage()
@@ -375,8 +399,10 @@ local function printMessage(label, sender, message, color, nameColor)
     end
 end
 
-local function printIncomingMessage(label, sender, message, color, nameColor, senderKey)
+local function printIncomingMessage(
+    label, sender, message, color, nameColor, senderKey, isEmote)
     local key = normalizeName(senderKey or sender) .. "\0" .. message
+        .. "\0" .. tostring(isEmote)
     local pending = pendingIncomingMessages[key]
     local isGroupMessage = label == "Party" or label == "Raid"
     local isNearbyMessage = label == "Nearby"
@@ -389,21 +415,18 @@ local function printIncomingMessage(label, sender, message, color, nameColor, se
             pending.nearby = pending.nearby or isNearbyMessage
             pending.nameColor = pending.nameColor or nameColor
             pending.color = pending.groupLabel and "|cffff7d0a" or color
-            pending.label = pending.groupLabel and pending.nearby
-                and pending.groupLabel .. " + Nearby"
-                or pending.groupLabel or "Nearby"
+            pending.isEmote = isEmote
             return
         end
 
         if pendingIncomingMessages[key] == pending then
             pendingIncomingMessages[key] = nil
-            printMessage(pending.label, pending.sender, pending.message,
-                pending.color, pending.nameColor)
+            printMessage(pending.sender, pending.message,
+                pending.color, pending.nameColor, pending.isEmote)
         end
     end
 
     pending = {
-        label = label,
         sender = sender,
         message = message,
         color = color,
@@ -411,14 +434,15 @@ local function printIncomingMessage(label, sender, message, color, nameColor, se
         groupLabel = isGroupMessage and label or nil,
         nearby = isNearbyMessage,
         receivedAt = GetTime(),
+        isEmote = isEmote,
     }
     pendingIncomingMessages[key] = pending
 
     C_Timer.After(0.2, function()
         if pendingIncomingMessages[key] == pending then
             pendingIncomingMessages[key] = nil
-            printMessage(pending.label, pending.sender, pending.message,
-                pending.color, pending.nameColor)
+            printMessage(pending.sender, pending.message,
+                pending.color, pending.nameColor, pending.isEmote)
         end
     end)
 end
@@ -633,6 +657,23 @@ local function createChatWindow()
     chatLog:SetMaxLines(200)
     chatLog:SetFading(false)
     chatLog:SetJustifyH("LEFT")
+    chatLog:SetHyperlinksEnabled(true)
+    chatLog:EnableMouse(true)
+    chatLog:SetScript("OnHyperlinkClick", function(_, link, text, button)
+        TrialChatCommon.HandleHyperlinkClick(link, text, button)
+    end)
+    chatLog:SetScript("OnHyperlinkEnter", function(self, link)
+        GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
+        if string.sub(link or "", 1, 6) == "tcurl:" then
+            GameTooltip:SetText("Click to copy URL")
+        else
+            GameTooltip:SetHyperlink(link)
+        end
+        GameTooltip:Show()
+    end)
+    chatLog:SetScript("OnHyperlinkLeave", function()
+        GameTooltip_Hide()
+    end)
     chatLog:EnableMouseWheel(true)
     chatLog:SetScript("OnMouseWheel", function(self, delta)
         if delta > 0 then
@@ -641,10 +682,17 @@ local function createChatWindow()
             self:ScrollDown()
         end
     end)
+    for _, line in ipairs(getChatHistory()) do
+        if type(line) == "string" then
+            chatLog:AddMessage(line)
+        end
+    end
+    chatLog:ScrollToBottom()
 
     chatInput = CreateFrame("EditBox", nil, chatWindow, "InputBoxTemplate")
     chatInput:SetAutoFocus(false)
     chatInput:SetMaxLetters(MAX_MESSAGE_BYTES)
+    TrialChatCommon.RegisterLinkInput(chatInput)
     chatInput:HookScript("OnEditFocusGained", updateChatWindowAlpha)
     chatInput:HookScript("OnEditFocusLost", updateChatWindowAlpha)
     chatInput:SetScript("OnEnterPressed", function(self)
@@ -822,11 +870,30 @@ frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
         return
     end
 
-    if string.sub(message, 1, #MESSAGE_TAG) ~= MESSAGE_TAG then return end
-    local chatText = string.sub(message, #MESSAGE_TAG + 1)
+    local messageTag = string.sub(message, 1, #EMOTE_TAG) == EMOTE_TAG
+        and EMOTE_TAG or MESSAGE_TAG
+    if string.sub(message, 1, #messageTag) ~= messageTag then return end
+    local isEmote = messageTag == EMOTE_TAG
+    local chatText = TrialChatCommon.DecodeMessageMarkup(
+        string.sub(message, #messageTag + 1))
+    chatText = TrialChatCommon.NormalizeMessageMarkup(chatText)
     local shortSender = string.match(sender, "^([^-]+)") or sender
     activeListeners[sender] = now
     updateRecipientList()
+
+    if isEmote then
+        if channel == "RAID" then
+            printIncomingMessage("Raid", shortSender, chatText, "|cffff7d0a",
+                "|cffff7d0a", sender, true)
+        elseif channel == "PARTY" then
+            printIncomingMessage("Party", shortSender, chatText, "|cffff7d0a",
+                "|cffff7d0a", sender, true)
+        elseif channel == "WHISPER" then
+            printIncomingMessage("Nearby", shortSender, chatText, "|cffff7d0a",
+                "|cffff7d0a", sender, true)
+        end
+        return
+    end
 
     if channel == "RAID" then
         printIncomingMessage("Raid", shortSender, chatText, "|cffff7d0a",
@@ -894,11 +961,32 @@ sendTrialChatMessage = function(msg)
     end
 
     if #msg > MAX_MESSAGE_BYTES then
-        showTrialChatNotice("|cffff3333[TrialChat] Message is too long (maximum 240 bytes).|r")
+        showTrialChatNotice("|cffff3333[TrialChat] Message is too long (maximum "
+            .. MAX_MESSAGE_BYTES .. " bytes).|r")
         return
     end
 
-    local payload = MESSAGE_TAG .. msg
+    local isEmote
+    local emoteToken
+    local emoteTarget
+    msg, isEmote, emoteToken, emoteTarget = TrialChatCommon.ParseEmote(msg)
+    if not msg then
+        showTrialChatNotice("|cffff3333[TrialChat] Enter the text for your emote.|r")
+        return
+    end
+    if #msg > MAX_MESSAGE_BYTES then
+        showTrialChatNotice("|cffff3333[TrialChat] Message is too long (maximum "
+            .. MAX_MESSAGE_BYTES .. " bytes).|r")
+        return
+    end
+    TrialChatCommon.PerformEmote(emoteToken, emoteTarget)
+    local payload = (isEmote and EMOTE_TAG or MESSAGE_TAG)
+        .. TrialChatCommon.EncodeMessageMarkup(msg)
+    if #payload > 255 then
+        showTrialChatNotice(
+            "|cffff3333[TrialChat] This message is too long to send with its links.|r")
+        return
+    end
     local classPayload = playerClass and RAID_CLASS_COLORS[playerClass]
         and CLASS_TAG .. playerClass or nil
     local sentToGroup = IsInGroup()
@@ -959,15 +1047,16 @@ sendTrialChatMessage = function(msg)
 
     local myShortName = string.match(playerName, "^([^-]+)") or playerName
     local myNameColor = getClassColor(playerClass)
+    local messageColor = isEmote and "|cffff7d0a"
+        or sentToGroup and "|cffff7d0a" or "|cffffcc00"
     if sentToGroup and sentNearbyWhisperCount > 0 then
-        printMessage(inRaid and "Raid + Nearby" or "Party + Nearby",
-            myShortName, msg, "|cffff7d0a", myNameColor)
+        printMessage(myShortName, msg, messageColor, myNameColor, isEmote)
     elseif sentToGroup then
-        printMessage(inRaid and "Raid" or "Party", myShortName, msg, "|cffff7d0a", myNameColor)
+        printMessage(myShortName, msg, messageColor, myNameColor, isEmote)
     elseif sentWhisperCount > 0 then
-        printMessage("Nearby", myShortName, msg, "|cffffcc00", myNameColor)
+        printMessage(myShortName, msg, messageColor, myNameColor, isEmote)
     else
-        printMessage("Nearby", myShortName, msg, "|cffffcc00", myNameColor)
+        printMessage(myShortName, msg, messageColor, myNameColor, isEmote)
         showTrialChatNotice(
             "|cffff7d0aBut nobody heard that, because there are no players using TrialChat around.|r")
     end

@@ -1,10 +1,11 @@
 ## Interface: 120100
 ## Title: TrialChat
-## Notes: TrialChat provides nearby chat, whisper-based password-protected group chats, and a permanent listener list. Group members connect through an online member. Use /tc to open nearby chat.
+## Notes: TrialChat provides nearby chat, whisper-based password-protected group chats, clickable links, WoW emotes, timestamps, and persistent history. Group history synchronization and offline group instances require all group members to use the same addon version. Use /tc to open nearby chat.
 ## Author: AI Peer
-## Version: 2.7
+## Version: 2.8
 ## SavedVariables: TrialChatDB
 ## IconTexture: Interface\AddOns\TrialChat\broke
 
+TrialChatCommon.lua
 TrialChat.lua
 TrialChatGroups.lua

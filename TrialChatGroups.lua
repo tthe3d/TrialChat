@@ -2,7 +2,10 @@ local PREFIX = "TrialChat"
 local GROUP_TAG = "TCG1|"
 local MAX_GROUP_NAME_BYTES = 24
 local MAX_PASSWORD_BYTES = 32
-local MAX_GROUP_MESSAGE_BYTES = 200
+local MAX_GROUP_MESSAGE_BYTES = 190
+local MAX_CHAT_HISTORY = 200
+local MAX_HISTORY_SYNC_MESSAGES = 50
+local HISTORY_CHUNK_BYTES = 170
 local MEMBER_TIMEOUT = 90
 local MEMBER_UPDATE_INTERVAL = 30
 local _, playerClass = UnitClass("player")
@@ -27,6 +30,12 @@ local function getSavedGroups()
     TrialChatDB = TrialChatDB or {}
     TrialChatDB.groups = TrialChatDB.groups or {}
     return TrialChatDB.groups
+end
+
+local function savedGroupIsCreator(group)
+    if type(group) ~= "table" then return false end
+    if group.isCreator ~= nil then return group.isCreator == true end
+    return not group.creatorName and not group.memberName
 end
 
 local function getGroupId(name)
@@ -70,6 +79,16 @@ local function hasMember(session, name)
     return findMemberKey(session, name) ~= nil
 end
 
+local saveGroup
+local sendHistoryToMember
+
+local function addKnownMember(session, name)
+    if not name or name == "" or isSelf(name) then return end
+    session.knownMembers = session.knownMembers or {}
+    session.knownMembers[normalizeName(name)] = name
+    session.reconnectName = name
+end
+
 local function getClassColor(classFile)
     local color = classFile and RAID_CLASS_COLORS[classFile]
     if not color then return nil end
@@ -83,6 +102,7 @@ end
 local function addMember(session, name, classFile)
     if not name or name == "" then return end
 
+    addKnownMember(session, name)
     local key = findMemberKey(session, name) or normalizeName(name)
     local existing = session.members[key]
     session.members[key] = {
@@ -94,6 +114,9 @@ local function addMember(session, name, classFile)
     if session.window then
         session.window:UpdateMembers()
     end
+    if activeGroups[session.id] == session and saveGroup then
+        saveGroup(session)
+    end
 end
 
 local function removeMember(session, name)
@@ -101,13 +124,32 @@ local function removeMember(session, name)
 
     local key = findMemberKey(session, name)
     if key then session.members[key] = nil end
+    if key and session.reconnectName
+        and namesMatch(session.reconnectName, name) then
+        local mostRecentMember
+        for _, member in pairs(session.members) do
+            if not isSelf(member.name)
+                and (not mostRecentMember or member.lastSeen > mostRecentMember.lastSeen) then
+                mostRecentMember = member
+            end
+        end
+        if mostRecentMember then
+            session.reconnectName = mostRecentMember.name
+        end
+    end
     if session.window then
         session.window:UpdateMembers()
+    end
+    if activeGroups[session.id] == session and saveGroup then
+        saveGroup(session)
     end
 end
 
 local function sendGroupProtocol(session, kind, target, body)
     if not target then return false end
+    if kind == "MSG2" or kind == "EMOTE2" then
+        body = TrialChatCommon.EncodeMessageMarkup(body or "")
+    end
     local payload = GROUP_TAG .. kind .. "|" .. session.id .. "|" .. (body or "")
     if #payload > 255 then
         showNotice("That group message is too long to send.")
@@ -143,26 +185,181 @@ local function updateWindowAlpha(window)
     window.frame:SetAlpha((mouseOver or inputHasFocus or recentMessage) and 1 or 0.45)
 end
 
-local function addGroupMessage(session, sender, message)
+local function makeMessageId(sender, counter)
+    local hash = 5381
+    for index = 1, #sender do
+        hash = (hash * 33 + string.byte(sender, index)) % 4294967296
+    end
+    return string.format("%08x-%08x-%04x-%04x",
+        hash, GetServerTime(), counter % 65536, math.random(0, 65535))
+end
+
+local function renderGroupMessage(session, entry)
+    local shortSender = string.match(entry.sender, "^([^-]+)") or entry.sender
+    local memberKey = findMemberKey(session, entry.sender)
+    local member = memberKey and session.members[memberKey]
+    local nameColor = entry.isEmote and "|cffff7d0a"
+        or getClassColor(member and member.classFile) or "|cffffcc00"
+    local timestamp = "|cffaaaaaa[" .. date("%H:%M", entry.timestamp) .. "]|r "
+    local displayMessage = TrialChatCommon.FormatMessageText(entry.message)
+    if entry.isEmote then
+        return timestamp .. nameColor .. shortSender .. " "
+            .. displayMessage .. "|r"
+    end
+    return timestamp .. nameColor .. shortSender .. "|r: " .. displayMessage
+end
+
+local function rebuildGroupLog(session)
     local window = session.window
     if not window then return end
 
-    addMember(session, sender)
-    local displayMessage = string.gsub(message, "|", "||")
-    local shortSender = string.match(sender, "^([^-]+)") or sender
-    local memberKey = findMemberKey(session, sender)
-    local member = memberKey and session.members[memberKey]
-    local nameColor = getClassColor(member and member.classFile) or "|cffffcc00"
-    window.log:AddMessage(nameColor .. shortSender .. "|r: " .. displayMessage)
+    window.log:Clear()
+    for _, item in ipairs(session.history or {}) do
+        local line = type(item) == "table"
+            and renderGroupMessage(session, item) or item
+        if type(line) == "string" then
+            window.log:AddMessage(line)
+        end
+    end
     window.log:ScrollToBottom()
-    window.lastMessageAt = GetTime()
-    updateWindowAlpha(window)
-    C_Timer.After(10, function()
-        updateWindowAlpha(window)
-    end)
 end
 
-local saveGroup
+local function addGroupMessage(
+    session, sender, message, isEmote, messageId, timestamp, isHistorical)
+    if isHistorical then
+        addKnownMember(session, sender)
+    else
+        addMember(session, sender)
+    end
+    message = TrialChatCommon.NormalizeMessageMarkup(message)
+    session.history = type(session.history) == "table" and session.history or {}
+
+    if messageId then
+        for _, item in ipairs(session.history) do
+            if type(item) == "table" and item.id == messageId then
+                return false
+            end
+        end
+    else
+        session.messageCounter = (session.messageCounter or 0) + 1
+        messageId = makeMessageId(sender, session.messageCounter)
+    end
+    timestamp = timestamp or GetServerTime()
+
+    local entry = {
+        id = messageId,
+        sender = sender,
+        message = message,
+        isEmote = isEmote,
+        timestamp = timestamp,
+    }
+    session.history[#session.history + 1] = entry
+    table.sort(session.history, function(left, right)
+        local leftTimestamp = type(left) == "table" and left.timestamp or 0
+        local rightTimestamp = type(right) == "table" and right.timestamp or 0
+        if leftTimestamp == rightTimestamp then
+            local leftId = type(left) == "table" and left.id or tostring(left)
+            local rightId = type(right) == "table" and right.id or tostring(right)
+            return leftId < rightId
+        end
+        return leftTimestamp < rightTimestamp
+    end)
+    while #session.history > MAX_CHAT_HISTORY do
+        table.remove(session.history, 1)
+    end
+
+    if activeGroups[session.id] == session and saveGroup then
+        saveGroup(session)
+    end
+    if session.window then
+        rebuildGroupLog(session)
+        session.window.lastMessageAt = GetTime()
+        updateWindowAlpha(session.window)
+        C_Timer.After(10, function()
+            updateWindowAlpha(session.window)
+        end)
+    end
+    return true, entry
+end
+
+local function sendHistoryEntry(session, target, entry, initialDelay)
+    local emoteFlag = entry.isEmote and "E" or "M"
+    local serialized = TrialChatCommon.EncodeMessageMarkup(table.concat({
+        entry.id, tostring(entry.timestamp), entry.sender, emoteFlag, entry.message,
+    }, ":"))
+    local chunkCount = math.ceil(#serialized / HISTORY_CHUNK_BYTES)
+    for index = 1, chunkCount do
+        local chunk = string.sub(serialized,
+            (index - 1) * HISTORY_CHUNK_BYTES + 1,
+            index * HISTORY_CHUNK_BYTES)
+        local payload = entry.id .. ":" .. index .. ":" .. chunkCount .. ":" .. chunk
+        C_Timer.After((initialDelay or 0) + (index - 1) * 0.1, function()
+            sendGroupProtocol(session, "HIST", target, payload)
+        end)
+    end
+end
+
+sendHistoryToMember = function(session, target)
+    local entries = {}
+    for index = #session.history, 1, -1 do
+        local item = session.history[index]
+        if type(item) == "table" then
+            table.insert(entries, 1, item)
+            if #entries >= MAX_HISTORY_SYNC_MESSAGES then break end
+        end
+    end
+
+    local delay = 0
+    for _, entry in ipairs(entries) do
+        local serialized = TrialChatCommon.EncodeMessageMarkup(table.concat({
+            entry.id, tostring(entry.timestamp), entry.sender,
+            entry.isEmote and "E" or "M", entry.message,
+        }, ":"))
+        local chunks = math.ceil(#serialized / HISTORY_CHUNK_BYTES)
+        sendHistoryEntry(session, target, entry, delay)
+        delay = delay + chunks * 0.1
+    end
+end
+
+local pendingHistoryChunks = {}
+
+local function receiveHistoryChunk(session, sender, body)
+    local messageId, chunkIndex, chunkCount, chunk =
+        string.match(body, "^([%x%-]+):(%d+):(%d+):(.*)$")
+    chunkIndex = tonumber(chunkIndex)
+    chunkCount = tonumber(chunkCount)
+    if not messageId or not chunkIndex or not chunkCount
+        or chunkCount < 1 or chunkCount > 8
+        or chunkIndex < 1 or chunkIndex > chunkCount then
+        return
+    end
+
+    local key = session.id .. "\0" .. normalizeName(sender) .. "\0" .. messageId
+    local transfer = pendingHistoryChunks[key]
+    if not transfer then
+        transfer = { chunks = {}, count = chunkCount }
+        pendingHistoryChunks[key] = transfer
+    elseif transfer.count ~= chunkCount then
+        pendingHistoryChunks[key] = nil
+        return
+    end
+    transfer.chunks[chunkIndex] = chunk
+
+    for index = 1, chunkCount do
+        if not transfer.chunks[index] then return end
+    end
+    pendingHistoryChunks[key] = nil
+
+    local serialized = TrialChatCommon.DecodeMessageMarkup(
+        table.concat(transfer.chunks))
+    local entryId, timestamp, entrySender, emoteFlag, message =
+        string.match(serialized, "^([%x%-]+):(%d+):([^:]+):([ME]):(.*)$")
+    timestamp = tonumber(timestamp)
+    if entryId ~= messageId or not timestamp then return end
+
+    addGroupMessage(session, entrySender, message,
+        emoteFlag == "E", entryId, timestamp, true)
+end
 
 local function createGroupWindow(session)
     if session.window then
@@ -234,6 +431,23 @@ local function createGroupWindow(session)
     window.log:SetMaxLines(200)
     window.log:SetFading(false)
     window.log:SetJustifyH("LEFT")
+    window.log:SetHyperlinksEnabled(true)
+    window.log:EnableMouse(true)
+    window.log:SetScript("OnHyperlinkClick", function(_, link, text, button)
+        TrialChatCommon.HandleHyperlinkClick(link, text, button)
+    end)
+    window.log:SetScript("OnHyperlinkEnter", function(self, link)
+        GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
+        if string.sub(link or "", 1, 6) == "tcurl:" then
+            GameTooltip:SetText("Click to copy URL")
+        else
+            GameTooltip:SetHyperlink(link)
+        end
+        GameTooltip:Show()
+    end)
+    window.log:SetScript("OnHyperlinkLeave", function()
+        GameTooltip_Hide()
+    end)
     window.log:EnableMouseWheel(true)
     window.log:SetScript("OnMouseWheel", function(self, delta)
         if delta > 0 then
@@ -242,6 +456,12 @@ local function createGroupWindow(session)
             self:ScrollDown()
         end
     end)
+    for _, line in ipairs(session.history or {}) do
+        local rendered = type(line) == "table"
+            and renderGroupMessage(session, line) or line
+        if type(rendered) == "string" then window.log:AddMessage(rendered) end
+    end
+    window.log:ScrollToBottom()
     window.log:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -42)
     window.log:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -176, 48)
 
@@ -279,6 +499,7 @@ local function createGroupWindow(session)
     window.input = input
     input:SetAutoFocus(false)
     input:SetMaxLetters(MAX_GROUP_MESSAGE_BYTES)
+    TrialChatCommon.RegisterLinkInput(input)
     input:SetHeight(26)
     input:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 14, 14)
     input:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -176, 14)
@@ -295,13 +516,40 @@ local function createGroupWindow(session)
             self:SetFocus()
             return
         end
+        local isEmote
+        local emoteToken
+        local emoteTarget
+        message, isEmote, emoteToken, emoteTarget =
+            TrialChatCommon.ParseEmote(message)
+        if not message then
+            showNotice("Enter the text for your emote.")
+            self:SetFocus()
+            return
+        end
         if #message > MAX_GROUP_MESSAGE_BYTES then
             showNotice("Group messages are limited to " .. MAX_GROUP_MESSAGE_BYTES .. " bytes.")
             self:SetFocus()
             return
         end
-        addGroupMessage(session, selfName or UnitName("player"), message)
-        sendToMembers(session, "MSG", message)
+        local sender = selfName or UnitName("player")
+        session.messageCounter = (session.messageCounter or 0) + 1
+        local messageId = makeMessageId(sender, session.messageCounter)
+        local timestamp = GetServerTime()
+        local messageKind = isEmote and "EMOTE2" or "MSG2"
+        local body = table.concat({
+            messageId, tostring(timestamp), isEmote and "E" or "M", message,
+        }, ":")
+        local encodedBody = TrialChatCommon.EncodeMessageMarkup(body)
+        local payload = GROUP_TAG .. messageKind .. "|" .. session.id .. "|" .. encodedBody
+        if #payload > 255 then
+            showNotice("That message is too long for the addon chat protocol.")
+            self:SetFocus()
+            return
+        end
+
+        TrialChatCommon.PerformEmote(emoteToken, emoteTarget)
+        addGroupMessage(session, sender, message, isEmote, messageId, timestamp)
+        sendToMembers(session, messageKind, body)
         self:SetFocus()
     end)
     input:SetScript("OnEscapePressed", function(self)
@@ -379,15 +627,77 @@ end
 
 saveGroup = function(session)
     local savedGroups = getSavedGroups()
+    for _, member in pairs(session.members or {}) do
+        if not isSelf(member.name) then
+            session.knownMembers = session.knownMembers or {}
+            session.knownMembers[normalizeName(member.name)] = member.name
+        end
+    end
+    local knownMembers = {}
+    for _, member in pairs(session.knownMembers or {}) do
+        knownMembers[#knownMembers + 1] = member
+    end
+    table.sort(knownMembers, function(left, right)
+        return normalizeName(left) < normalizeName(right)
+    end)
     savedGroups[session.id] = {
         name = session.name,
         password = session.password,
-        memberName = session.targetName,
-        isCreator = session.isCreator or not session.targetName,
+        memberName = session.reconnectName or session.targetName,
+        isCreator = session.isCreator == true,
         creatorName = session.creatorName,
         width = session.width,
         height = session.height,
+        history = session.history or {},
+        knownMembers = knownMembers,
     }
+end
+
+local function getKnownMembers(savedGroup)
+    local knownMembers = {}
+    local savedMembers = type(savedGroup and savedGroup.knownMembers) == "table"
+        and savedGroup.knownMembers or {}
+    for _, name in ipairs(savedMembers) do
+        if type(name) == "string" and name ~= "" and not isSelf(name) then
+            knownMembers[normalizeName(name)] = name
+        end
+    end
+    if savedGroup and savedGroup.memberName and not isSelf(savedGroup.memberName) then
+        knownMembers[normalizeName(savedGroup.memberName)] = savedGroup.memberName
+    end
+    return knownMembers
+end
+
+local function getJoinCandidates(savedGroup, preferredName)
+    local candidates = {}
+    local function addCandidate(name)
+        if type(name) ~= "string" or name == "" or isSelf(name) then return end
+        for _, candidate in ipairs(candidates) do
+            if namesMatch(candidate, name) then return end
+        end
+        candidates[#candidates + 1] = name
+    end
+
+    addCandidate(preferredName)
+    local knownMembers = getKnownMembers(savedGroup)
+    local sortedMembers = {}
+    for _, name in pairs(knownMembers) do
+        sortedMembers[#sortedMembers + 1] = name
+    end
+    table.sort(sortedMembers, function(left, right)
+        return normalizeName(left) < normalizeName(right)
+    end)
+    for _, name in ipairs(sortedMembers) do
+        addCandidate(name)
+    end
+    return candidates
+end
+
+local function isJoinCandidate(session, name)
+    for _, candidate in ipairs(session.joinCandidates or {}) do
+        if namesMatch(candidate, name) then return true end
+    end
+    return false
 end
 
 local function activateGroup(session)
@@ -405,6 +715,7 @@ local function completePendingJoin(session, sender)
     addMember(session, sender)
     activateGroup(session)
     sendToMembers(session, "MEMBER", selfName or UnitName("player"))
+    sendHistoryToMember(session, sender)
 end
 
 local function validateMemberName(name)
@@ -415,6 +726,10 @@ local function validateMemberName(name)
     end
     return name
 end
+
+local startJoinAttempt
+local openGroupDialog
+local createGroup
 
 local function joinGroup(name, password, targetName, savedGroup)
     local id = getGroupId(name)
@@ -429,41 +744,91 @@ local function joinGroup(name, password, targetName, savedGroup)
         return
     end
 
-    targetName = validateMemberName(targetName)
-    if not targetName then return end
+    if targetName then
+        targetName = validateMemberName(targetName)
+        if not targetName then return end
+    end
+
+    local joinCandidates = getJoinCandidates(savedGroup, targetName)
+    if #joinCandidates == 0 then
+        showNotice("Enter the name of an online group member to connect through.")
+        return
+    end
 
     local session = {
         id = id,
         name = name,
         password = password,
         members = {},
-        targetName = targetName,
-        isCreator = false,
+        targetName = joinCandidates[1],
+        isCreator = savedGroup and savedGroup.isCreator
+            and savedGroup.creatorName and namesMatch(savedGroup.creatorName, selfName),
         creatorName = savedGroup and savedGroup.creatorName,
         width = savedGroup and savedGroup.width,
         height = savedGroup and savedGroup.height,
+        history = savedGroup and type(savedGroup.history) == "table"
+            and savedGroup.history or {},
+        knownMembers = getKnownMembers(savedGroup),
+        reconnectName = joinCandidates[1],
+        joinCandidates = joinCandidates,
+        hasSavedGroup = type(savedGroup) == "table",
     }
     pendingJoins[id] = session
-    if not sendGroupProtocol(session, "HELLO", targetName, password) then
+    startJoinAttempt(session, 1)
+end
+
+startJoinAttempt = function(session, candidateIndex)
+    local id = session.id
+    local targetName = session.joinCandidates[candidateIndex]
+    session.targetName = targetName
+    if not sendGroupProtocol(session, "HELLO", targetName, session.password) then
         pendingJoins[id] = nil
         return
     end
 
     for retry = 1, 3 do
         C_Timer.After(retry * 2, function()
-            if pendingJoins[id] == session then
-                sendGroupProtocol(session, "HELLO", targetName, password)
+            if pendingJoins[id] == session and session.targetName == targetName then
+                sendGroupProtocol(session, "HELLO", targetName, session.password)
             end
         end)
     end
     C_Timer.After(8, function()
-        if pendingJoins[id] ~= session then return end
+        if pendingJoins[id] ~= session or session.targetName ~= targetName then return end
+        local nextCandidate = candidateIndex + 1
+        if session.joinCandidates[nextCandidate] then
+            startJoinAttempt(session, nextCandidate)
+            return
+        end
+
         pendingJoins[id] = nil
-        showNotice("No reply from " .. targetName .. ". Check that they are online and the group details are correct.")
+        if session.isCreator or session.hasSavedGroup then
+            showNotice("No saved group member replied. Opening your saved group locally.")
+            createGroup(session.name, session.password, getSavedGroups()[id] or {
+                name = session.name,
+                password = session.password,
+                isCreator = session.isCreator == true,
+                creatorName = session.creatorName,
+                memberName = session.reconnectName,
+                history = session.history,
+                knownMembers = session.knownMembers,
+                width = session.width,
+                height = session.height,
+            })
+            return
+        end
+
+        showNotice("No saved group member replied. Choose an online member if one is available.")
+        openGroupDialog("join", getSavedGroups()[id] or {
+            name = session.name,
+            password = session.password,
+            memberName = targetName,
+            knownMembers = session.knownMembers,
+        })
     end)
 end
 
-local function createGroup(name, password, savedGroup)
+createGroup = function(name, password, savedGroup)
     local id = getGroupId(name)
     if activeGroups[id] then
         activeGroups[id].window.frame:Show()
@@ -480,10 +845,16 @@ local function createGroup(name, password, savedGroup)
         name = name,
         password = password,
         members = {},
-        isCreator = true,
-        creatorName = selfName or UnitName("player"),
+        isCreator = savedGroup
+            and savedGroupIsCreator(savedGroup) or not savedGroup,
+        creatorName = savedGroup and savedGroup.creatorName
+            or (not savedGroup and (selfName or UnitName("player"))),
         width = savedGroup and savedGroup.width,
         height = savedGroup and savedGroup.height,
+        history = savedGroup and type(savedGroup.history) == "table"
+            and savedGroup.history or {},
+        knownMembers = getKnownMembers(savedGroup),
+        reconnectName = savedGroup and savedGroup.memberName,
     }
     activateGroup(session)
 end
@@ -506,7 +877,7 @@ local function validateGroupDetails(name, password)
 end
 
 local dialog
-local function openGroupDialog(mode, preset)
+openGroupDialog = function(mode, preset)
     if not dialog then
         dialog = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
         dialog:SetSize(340, 250)
@@ -636,7 +1007,7 @@ end
 
 local function exitGroup(id)
     local savedGroup = getSavedGroups()[id]
-    if not savedGroup or savedGroup.isCreator or not savedGroup.memberName then
+    if not savedGroup or savedGroupIsCreator(savedGroup) then
         showNotice("Only non-creator members can exit a saved group.")
         return
     end
@@ -652,7 +1023,7 @@ local function deleteGroup(id)
     local session = activeGroups[id]
     local savedGroup = getSavedGroups()[id]
     if not (session and session.isCreator)
-        and not (savedGroup and (savedGroup.isCreator or not savedGroup.memberName)) then
+        and not savedGroupIsCreator(savedGroup) then
         showNotice("Only the group creator can delete this group.")
         return
     end
@@ -823,10 +1194,13 @@ function Groups:ToggleMenu(anchor)
                 name = group.name,
                 password = group.password,
                 memberName = group.memberName,
-                isCreator = group.isCreator or not group.memberName,
+                isCreator = savedGroupIsCreator(group),
                 creatorName = group.creatorName,
                 width = group.width,
                 height = group.height,
+                history = group.history,
+                knownMembers = type(group.knownMembers) == "table"
+                    and group.knownMembers or {},
             }
         end
     end
@@ -850,14 +1224,15 @@ function Groups:ToggleMenu(anchor)
                 if active then
                     active.window.frame:Show()
                     active.window.input:SetFocus()
+                elseif #getJoinCandidates(groupToConnect) > 0 then
+                    joinGroup(groupToConnect.name, groupToConnect.password,
+                        groupToConnect.memberName, groupToConnect)
                 elseif groupToConnect.isCreator then
                     createGroup(groupToConnect.name, groupToConnect.password,
                         groupToConnect)
-                elseif groupToConnect.memberName then
-                    joinGroup(groupToConnect.name, groupToConnect.password,
-                        groupToConnect.memberName, groupToConnect)
                 else
-                    openGroupDialog("join", groupToConnect)
+                    createGroup(groupToConnect.name, groupToConnect.password,
+                        groupToConnect)
                 end
             end
             row.text:SetText(group.name)
@@ -929,16 +1304,20 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
                     end
                 end
             end
+            for _, memberName in pairs(session.knownMembers or {}) do
+                sendGroupProtocol(session, "KNOWN", sender, memberName)
+            end
             sendToMembers(session, "MEMBER", sender)
             if playerClass then
                 sendToMembers(session, "CLASS", playerClass, sender)
             end
+            sendHistoryToMember(session, sender)
         end
         return
     end
 
     if kind == "WELCOME" then
-        if pending and namesMatch(sender, pending.targetName) then
+        if pending and isJoinCandidate(pending, sender) then
             if body ~= "" then
                 pending.creatorName = body
             end
@@ -950,11 +1329,21 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
     if kind == "MEMBER" then
         if session and hasMember(session, sender) then
             addMember(session, body)
-        elseif pending and namesMatch(sender, pending.targetName) then
+        elseif pending and isJoinCandidate(pending, sender) then
             if body ~= "" then
                 addMember(pending, body)
             end
             completePendingJoin(pending, sender)
+        end
+        return
+    end
+
+    if kind == "KNOWN" then
+        if session and hasMember(session, sender) then
+            addKnownMember(session, body)
+            if saveGroup then saveGroup(session) end
+        elseif pending and isJoinCandidate(pending, sender) then
+            addKnownMember(pending, body)
         end
         return
     end
@@ -1002,8 +1391,32 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
         return
     end
 
-    if kind == "MSG" and session and hasMember(session, sender) then
-        addGroupMessage(session, sender, body)
+    if (kind == "MSG2" or kind == "EMOTE2")
+        and session and hasMember(session, sender) then
+        local decodedBody = TrialChatCommon.DecodeMessageMarkup(body)
+        local messageId, timestamp, emoteFlag, text =
+            string.match(decodedBody, "^([%x%-]+):(%d+):([ME]):(.*)$")
+        timestamp = tonumber(timestamp)
+        if messageId and timestamp then
+            addGroupMessage(session, sender, text,
+                emoteFlag == "E", messageId, timestamp)
+        end
+        return
+    end
+
+    if (kind == "MSG" or kind == "EMOTE")
+        and session and hasMember(session, sender) then
+        local decodedBody = TrialChatCommon.DecodeMessageMarkup(body)
+        addGroupMessage(session, sender, decodedBody, kind == "EMOTE")
+        return
+    end
+
+    if kind == "HIST" then
+        if session and hasMember(session, sender) then
+            receiveHistoryChunk(session, sender, body)
+        elseif pending and isJoinCandidate(pending, sender) then
+            receiveHistoryChunk(pending, sender, body)
+        end
     end
 end)
 
@@ -1024,7 +1437,10 @@ C_Timer.NewTicker(MEMBER_UPDATE_INTERVAL, function()
             end
         end
         for _, key in ipairs(expired) do
-            session.members[key] = nil
+            local member = session.members[key]
+            if member then
+                removeMember(session, member.name)
+            end
         end
         if session.window then
             session.window:UpdateMembers()
