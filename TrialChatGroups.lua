@@ -254,7 +254,7 @@ local function addGroupMessage(
     end
     timestamp = timestamp or GetServerTime()
 
-    if shouldNotify then
+    if shouldNotify and not session.muted then
         PlaySound(SOUNDKIT.TELL_MESSAGE)
     end
 
@@ -735,6 +735,7 @@ saveGroup = function(session)
     savedGroups[session.id] = {
         name = session.name,
         password = session.password,
+        muted = session.muted == true,
         memberName = session.reconnectName or session.targetName,
         isCreator = session.isCreator == true,
         creatorName = session.creatorName,
@@ -799,8 +800,10 @@ local function activateGroup(session)
     addMember(session, selfName or UnitName("player"))
     saveGroup(session)
     createGroupWindow(session)
-    session.window.frame:Show()
-    session.window.input:SetFocus()
+    if not session.autoJoin then
+        session.window.frame:Show()
+        session.window.input:SetFocus()
+    end
 end
 
 local function completePendingJoin(session, sender)
@@ -823,7 +826,7 @@ local startJoinAttempt
 local openGroupDialog
 local createGroup
 
-local function joinGroup(name, password, targetName, savedGroup)
+local function joinGroup(name, password, targetName, savedGroup, autoJoin)
     local id = getGroupId(name)
     local active = activeGroups[id]
     if active then
@@ -860,6 +863,8 @@ local function joinGroup(name, password, targetName, savedGroup)
         height = savedGroup and savedGroup.height,
         history = savedGroup and type(savedGroup.history) == "table"
             and savedGroup.history or {},
+        muted = savedGroup and savedGroup.muted == true,
+        autoJoin = autoJoin == true,
         knownMembers = getKnownMembers(savedGroup),
         reconnectName = joinCandidates[1],
         joinCandidates = joinCandidates,
@@ -906,7 +911,8 @@ startJoinAttempt = function(session, candidateIndex)
                 knownMembers = session.knownMembers,
                 width = session.width,
                 height = session.height,
-            })
+                muted = session.muted,
+            }, session.autoJoin)
             return
         end
 
@@ -920,7 +926,7 @@ startJoinAttempt = function(session, candidateIndex)
     end)
 end
 
-createGroup = function(name, password, savedGroup)
+createGroup = function(name, password, savedGroup, autoJoin)
     local id = getGroupId(name)
     if activeGroups[id] then
         activeGroups[id].window.frame:Show()
@@ -945,6 +951,8 @@ createGroup = function(name, password, savedGroup)
         height = savedGroup and savedGroup.height,
         history = savedGroup and type(savedGroup.history) == "table"
             and savedGroup.history or {},
+        muted = savedGroup and savedGroup.muted == true,
+        autoJoin = autoJoin == true,
         knownMembers = getKnownMembers(savedGroup),
         reconnectName = savedGroup and savedGroup.memberName,
     }
@@ -1153,18 +1161,44 @@ local function createMenuRow(index)
     row.connectButton = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
     row.connectButton:SetSize(76, 18)
     row.connectButton:SetPoint("RIGHT", row, "RIGHT", -2, 0)
-    row.connectButton:SetScript("OnClick", function(self)
+    row.connectButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    row.connectButton:SetScript("OnClick", function(self, button)
         local parent = self:GetParent()
-        local savedGroup = parent.savedGroup
-        if activeGroups[parent.groupId] then
-            menu:Hide()
-            StaticPopup_Show("TRIALCHAT_CONFIRM_DISCONNECT",
-                parent.groupName, nil, parent.groupId)
-        else
-            menu:Hide()
-            parent.connect(savedGroup)
+        local active = activeGroups[parent.groupId]
+        if button == "RightButton" then
+            if active then
+                menu:Hide()
+                StaticPopup_Show("TRIALCHAT_CONFIRM_DISCONNECT",
+                    parent.groupName, nil, parent.groupId)
+            end
+            return
         end
+
+        local savedGroup = getSavedGroups()[parent.groupId]
+        local wasMuted
+        if active then
+            wasMuted = active.muted
+        else
+            wasMuted = savedGroup and savedGroup.muted
+        end
+        local muted = not wasMuted
+        if active then
+            active.muted = muted
+            saveGroup(active)
+        elseif savedGroup then
+            savedGroup.muted = muted
+        end
+        if parent.savedGroup then
+            parent.savedGroup.muted = muted
+        end
+        self:SetText(muted and "Unmute" or "Mute")
     end)
+    row.connectButton:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:SetText("Left-click to mute or unmute the message sound.\nRight-click to disconnect.")
+        GameTooltip:Show()
+    end)
+    row.connectButton:SetScript("OnLeave", GameTooltip_Hide)
     row.connectButton:Hide()
 
     row.exitButton = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
@@ -1286,6 +1320,7 @@ function Groups:ToggleMenu(anchor)
                 name = group.name,
                 password = group.password,
                 memberName = group.memberName,
+                muted = group.muted == true,
                 isCreator = savedGroupIsCreator(group),
                 creatorName = group.creatorName,
                 width = group.width,
@@ -1331,8 +1366,12 @@ function Groups:ToggleMenu(anchor)
             row.action = function()
                 groupRow.connect(savedGroup)
             end
-            local isConnected = activeGroups[group.id] ~= nil
-            row.connectButton:SetText(isConnected and "Disconnect" or "Connect")
+            local active = activeGroups[group.id]
+            local isMuted = active and active.muted
+            if not active then
+                isMuted = group.muted
+            end
+            row.connectButton:SetText(isMuted and "Unmute" or "Mute")
             row.connectButton:SetShown(true)
             row.exitButton:SetShown(not savedGroup.isCreator)
             row.deleteButton:SetShown(savedGroup.isCreator)
@@ -1360,7 +1399,48 @@ end
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("CHAT_MSG_ADDON")
 eventFrame:RegisterEvent("PLAYER_LOGOUT")
+eventFrame:RegisterEvent("PLAYER_LOGIN")
+local autoJoinStarted = false
+local function autoJoinSavedGroups()
+    if autoJoinStarted then return end
+    autoJoinStarted = true
+
+    local savedGroups = getSavedGroups()
+    local groups = {}
+    for id, group in pairs(savedGroups) do
+        if type(group) == "table" and type(group.name) == "string"
+            and type(group.password) == "string" then
+            groups[#groups + 1] = { id = id, group = group }
+        end
+    end
+    table.sort(groups, function(left, right)
+        return strlower(left.group.name) < strlower(right.group.name)
+    end)
+
+    for _, entry in ipairs(groups) do
+        local id = entry.id
+        local group = entry.group
+        if not activeGroups[id] and not pendingJoins[id] then
+            local candidates = getJoinCandidates(group, group.memberName)
+            if #candidates > 0 then
+                joinGroup(group.name, group.password, group.memberName,
+                    group, true)
+            elseif savedGroupIsCreator(group) then
+                createGroup(group.name, group.password, group, true)
+            else
+                showNotice("Could not automatically join " .. group.name
+                    .. ": no saved group members are available to connect through.")
+            end
+        end
+    end
+end
+
 eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution, sender)
+    if event == "PLAYER_LOGIN" then
+        autoJoinSavedGroups()
+        return
+    end
+
     if event == "PLAYER_LOGOUT" then
         for _, session in pairs(activeGroups) do
             sendToMembers(session, "BYE")
@@ -1512,6 +1592,10 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
         end
     end
 end)
+
+if IsLoggedIn() then
+    C_Timer.After(1, autoJoinSavedGroups)
+end
 
 C_Timer.NewTicker(MEMBER_UPDATE_INTERVAL, function()
     local now = GetTime()
