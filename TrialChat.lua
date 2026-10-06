@@ -45,44 +45,9 @@ local updateChatContentLayout
 local RECIPIENT_ROW_HEIGHT = 18
 local CHAT_WINDOW_IDLE_ALPHA = 0.45
 local CHAT_MESSAGE_VISIBLE_SECONDS = 10
-local CHAT_WINDOW_FADE_SECONDS = 0.4
-local chatWindowAlphaAnimations = {}
 local lastChatMessageAt
 if fullPlayerName and playerRealm and playerRealm ~= "" then
     fullPlayerName = fullPlayerName .. "-" .. playerRealm
-end
-
-local function setWindowAlphaSmooth(frame, targetAlpha)
-    if not frame then return end
-
-    local animation = chatWindowAlphaAnimations[frame]
-    if not animation then
-        local animationGroup = frame:CreateAnimationGroup()
-        local alphaAnimation = animationGroup:CreateAnimation("Alpha")
-        alphaAnimation:SetDuration(CHAT_WINDOW_FADE_SECONDS)
-        alphaAnimation:SetSmoothing("OUT")
-        animation = {
-            group = animationGroup,
-            animation = alphaAnimation,
-        }
-        chatWindowAlphaAnimations[frame] = animation
-    end
-
-    if animation.targetAlpha == targetAlpha
-        and (animation.group:IsPlaying() or frame:GetAlpha() == targetAlpha) then
-        return
-    end
-
-    local currentAlpha = frame:GetAlpha()
-    if animation.group:IsPlaying() then
-        animation.group:Stop()
-        frame:SetAlpha(currentAlpha)
-    end
-
-    animation.targetAlpha = targetAlpha
-    animation.animation:SetFromAlpha(currentAlpha)
-    animation.animation:SetToAlpha(targetAlpha)
-    animation.group:Play()
 end
 
 local function updateChatWindowAlpha()
@@ -99,9 +64,9 @@ local function updateChatWindowAlpha()
     local alpha = (mouseOverChat or mouseOverListeners or inputHasFocus or recentMessage)
         and 1 or CHAT_WINDOW_IDLE_ALPHA
 
-    setWindowAlphaSmooth(chatWindow, alpha)
+    chatWindow:SetAlpha(alpha)
     if recipientPanel then
-        setWindowAlphaSmooth(recipientPanel, alpha)
+        recipientPanel:SetAlpha(alpha)
     end
 end
 

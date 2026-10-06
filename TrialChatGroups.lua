@@ -5,7 +5,6 @@ local MAX_PASSWORD_BYTES = 32
 local MAX_GROUP_MESSAGE_BYTES = 200
 local MEMBER_TIMEOUT = 90
 local MEMBER_UPDATE_INTERVAL = 30
-local GROUP_WINDOW_FADE_SECONDS = 0.4
 local _, playerClass = UnitClass("player")
 
 local Groups = {}
@@ -13,7 +12,7 @@ TrialChatGroups = Groups
 
 local activeGroups = {}
 local pendingJoins = {}
-local windowAlphaAnimations = {}
+local nearbyPlayers = {}
 local playerName, playerRealm = UnitFullName("player")
 local selfName = playerName
 if selfName and playerRealm and playerRealm ~= "" then
@@ -134,37 +133,6 @@ local function sendToMembers(session, kind, body, exceptName)
     return sent
 end
 
-local function setWindowAlphaSmooth(frame, targetAlpha)
-    local animation = windowAlphaAnimations[frame]
-    if not animation then
-        local animationGroup = frame:CreateAnimationGroup()
-        local alphaAnimation = animationGroup:CreateAnimation("Alpha")
-        alphaAnimation:SetDuration(GROUP_WINDOW_FADE_SECONDS)
-        alphaAnimation:SetSmoothing("OUT")
-        animation = {
-            group = animationGroup,
-            animation = alphaAnimation,
-        }
-        windowAlphaAnimations[frame] = animation
-    end
-
-    if animation.targetAlpha == targetAlpha
-        and (animation.group:IsPlaying() or frame:GetAlpha() == targetAlpha) then
-        return
-    end
-
-    local currentAlpha = frame:GetAlpha()
-    if animation.group:IsPlaying() then
-        animation.group:Stop()
-        frame:SetAlpha(currentAlpha)
-    end
-
-    animation.targetAlpha = targetAlpha
-    animation.animation:SetFromAlpha(currentAlpha)
-    animation.animation:SetToAlpha(targetAlpha)
-    animation.group:Play()
-end
-
 local function updateWindowAlpha(window)
     if not window or not window.frame then return end
 
@@ -172,8 +140,7 @@ local function updateWindowAlpha(window)
     local inputHasFocus = window.input and window.input:HasFocus()
     local recentMessage = window.lastMessageAt
         and GetTime() - window.lastMessageAt < 10
-    setWindowAlphaSmooth(
-        window.frame, (mouseOver or inputHasFocus or recentMessage) and 1 or 0.45)
+    window.frame:SetAlpha((mouseOver or inputHasFocus or recentMessage) and 1 or 0.45)
 end
 
 local function addGroupMessage(session, sender, message)
