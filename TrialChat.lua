@@ -96,6 +96,15 @@ local function normalizeName(name)
     return name and strlower(name) or nil
 end
 
+local function normalizeCharacterName(name)
+    local normalized = normalizeName(name)
+    if normalized and not string.find(name, "-", 1, true)
+        and playerRealm and playerRealm ~= "" then
+        return normalized .. "-" .. normalizeName(playerRealm)
+    end
+    return normalized
+end
+
 local function getPermanentListeners()
     TrialChatDB = TrialChatDB or {}
     TrialChatDB.permanentListeners = TrialChatDB.permanentListeners or {}
@@ -179,7 +188,7 @@ local function isSelf(sender)
 end
 
 local function getGroupMembers()
-    local members, shortNames = {}, {}
+    local members = {}
     local count = IsInRaid() and 40 or 4
     local unitPrefix = IsInRaid() and "raid" or "party"
 
@@ -187,14 +196,12 @@ local function getGroupMembers()
         local unit = unitPrefix .. index
         local name = getFullName(unit)
         if name then
-            members[normalizeName(name)] = name
-            local shortName = string.match(name, "^([^-]+)")
-            shortNames[normalizeName(shortName)] = true
+            members[normalizeCharacterName(name)] = name
             rememberUnitClass(unit, name)
         end
     end
 
-    return members, shortNames
+    return members
 end
 
 local function getTrialChatRecipients()
@@ -898,7 +905,7 @@ sendTrialChatMessage = function(msg)
     local inRaid = IsInRaid()
     local sentWhisperCount = 0
     local sentNearbyWhisperCount = 0
-    local groupMembers, groupShortNames = getGroupMembers()
+    local groupMembers = getGroupMembers()
 
     if sentToGroup and not inRaid then
         local groupChannel = "PARTY"
@@ -912,13 +919,13 @@ sendTrialChatMessage = function(msg)
     local activeTargetsByShortName = {}
     for targetPlayer in pairs(activeListeners) do
         if not isSelf(targetPlayer) then
-            sendTargets[normalizeName(targetPlayer)] = targetPlayer
+            sendTargets[normalizeCharacterName(targetPlayer)] = targetPlayer
             local shortName = string.match(targetPlayer, "^([^-]+)")
             activeTargetsByShortName[normalizeName(shortName)] = true
         end
     end
-    for targetKey, targetPlayer in pairs(getPermanentListeners()) do
-        local normalizedKey = normalizeName(targetKey)
+    for _, targetPlayer in pairs(getPermanentListeners()) do
+        local normalizedKey = normalizeCharacterName(targetPlayer)
         local shortName = string.match(targetPlayer, "^([^-]+)") or targetPlayer
         local isBareName = not string.find(targetPlayer, "-", 1, true)
         local alreadyActive = sendTargets[normalizedKey]
@@ -929,17 +936,15 @@ sendTrialChatMessage = function(msg)
     end
 
     if inRaid then
-        for targetKey, targetPlayer in pairs(groupMembers) do
+        for _, targetPlayer in pairs(groupMembers) do
             if not isSelf(targetPlayer) then
-                sendTargets[targetKey] = targetPlayer
+                sendTargets[normalizeCharacterName(targetPlayer)] = targetPlayer
             end
         end
     end
 
-    for targetKey, targetPlayer in pairs(sendTargets) do
-        local shortName = string.match(targetPlayer, "^([^-]+)")
-        local isGroupMember = groupMembers[targetKey]
-            or (not string.find(targetPlayer, "-", 1, true) and groupShortNames[normalizeName(shortName)])
+    for _, targetPlayer in pairs(sendTargets) do
+        local isGroupMember = groupMembers[normalizeCharacterName(targetPlayer)] ~= nil
         if not isGroupMember or inRaid then
             if classPayload and not (inRaid and isGroupMember) then
                 C_ChatInfo.SendAddonMessage(PREFIX, classPayload, "WHISPER", targetPlayer)
