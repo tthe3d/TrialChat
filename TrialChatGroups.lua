@@ -179,10 +179,16 @@ local function updateWindowAlpha(window)
     if not window or not window.frame then return end
 
     local mouseOver = window.frame:IsShown() and window.frame:IsMouseOver()
+        or (window.memberPanel and window.memberPanel:IsShown()
+            and window.memberPanel:IsMouseOver())
     local inputHasFocus = window.input and window.input:HasFocus()
     local recentMessage = window.lastMessageAt
         and GetTime() - window.lastMessageAt < 10
-    window.frame:SetAlpha((mouseOver or inputHasFocus or recentMessage) and 1 or 0.45)
+    local alpha = (mouseOver or inputHasFocus or recentMessage) and 1 or 0.45
+    window.frame:SetAlpha(alpha)
+    if window.memberPanel then
+        window.memberPanel:SetAlpha(alpha)
+    end
 end
 
 local function makeMessageId(sender, counter)
@@ -201,12 +207,13 @@ local function renderGroupMessage(session, entry)
     local nameColor = entry.isEmote and "|cffff7d0a"
         or getClassColor(member and member.classFile) or "|cffffcc00"
     local timestamp = "|cffaaaaaa[" .. date("%H:%M", entry.timestamp) .. "]|r "
+    local senderText = nameColor .. shortSender .. "|r"
     local displayMessage = TrialChatCommon.FormatMessageText(entry.message)
     if entry.isEmote then
-        return timestamp .. nameColor .. shortSender .. " "
+        return timestamp .. senderText .. " "
             .. displayMessage .. "|r"
     end
-    return timestamp .. nameColor .. shortSender .. "|r: " .. displayMessage
+    return timestamp .. senderText .. ": " .. displayMessage
 end
 
 local function rebuildGroupLog(session)
@@ -218,7 +225,7 @@ local function rebuildGroupLog(session)
         local line = type(item) == "table"
             and renderGroupMessage(session, item) or item
         if type(line) == "string" then
-            window.log:AddMessage(line)
+            window.log:AddMessage(TrialChatCommon.RemovePlayerLinks(line))
         end
     end
     window.log:ScrollToBottom()
@@ -357,8 +364,16 @@ local function receiveHistoryChunk(session, sender, body)
     timestamp = tonumber(timestamp)
     if entryId ~= messageId or not timestamp then return end
 
-    addGroupMessage(session, entrySender, message,
+    local added, entry = addGroupMessage(session, entrySender, message,
         emoteFlag == "E", entryId, timestamp, true)
+    if added and activeGroups[session.id] == session then
+        for _, member in pairs(session.members) do
+            if not namesMatch(member.name, selfName or UnitName("player"))
+                and not namesMatch(member.name, sender) then
+                sendHistoryEntry(session, member.name, entry)
+            end
+        end
+    end
 end
 
 local function createGroupWindow(session)
@@ -379,7 +394,7 @@ local function createGroupWindow(session)
     frame:SetFrameLevel(100)
     frame:SetMovable(true)
     frame:SetResizable(true)
-    frame:SetResizeBounds(580, 360, 1200, 900)
+    frame:SetResizeBounds(320, 320, 1200, 900)
     frame:SetClampedToScreen(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
@@ -417,8 +432,16 @@ local function createGroupWindow(session)
     end)
 
     local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOP", frame, "TOP", 0, -12)
+    title:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -12)
+    title:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -14, -12)
+    title:SetJustifyH("CENTER")
     title:SetText(session.name)
+
+    window.onlineMemberCount = frame:CreateFontString(
+        nil, "OVERLAY", "GameFontNormalSmall")
+    window.onlineMemberCount:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -32)
+    window.onlineMemberCount:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -14, -32)
+    window.onlineMemberCount:SetJustifyH("CENTER")
 
     local closeButton = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     closeButton:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
@@ -436,10 +459,13 @@ local function createGroupWindow(session)
     window.log:SetScript("OnHyperlinkClick", function(_, link, text, button)
         TrialChatCommon.HandleHyperlinkClick(link, text, button)
     end)
-    window.log:SetScript("OnHyperlinkEnter", function(self, link)
+    window.log:SetScript("OnHyperlinkEnter", function(self, link, text)
         GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
         if string.sub(link or "", 1, 6) == "tcurl:" then
             GameTooltip:SetText("Click to copy URL")
+        elseif string.sub(link or "", 1, 7) == "player:"
+            or string.sub(link or "", 1, 9) == "tcplayer:" then
+            GameTooltip:SetText("Click for player options: " .. (text or "player"))
         else
             GameTooltip:SetHyperlink(link)
         end
@@ -459,17 +485,28 @@ local function createGroupWindow(session)
     for _, line in ipairs(session.history or {}) do
         local rendered = type(line) == "table"
             and renderGroupMessage(session, line) or line
-        if type(rendered) == "string" then window.log:AddMessage(rendered) end
+        if type(rendered) == "string" then
+            window.log:AddMessage(TrialChatCommon.RemovePlayerLinks(rendered))
+        end
     end
     window.log:ScrollToBottom()
-    window.log:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -42)
-    window.log:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -176, 48)
+    window.log:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -58)
+    window.log:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -14, 48)
 
-    local memberPanel = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+    local memberPanel = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
     window.memberPanel = memberPanel
-    memberPanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 414, -38)
-    memberPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -10, 48)
+    memberPanel:SetPoint("TOPLEFT", frame, "TOPRIGHT", 0, 0)
+    memberPanel:SetPoint("BOTTOMLEFT", frame, "BOTTOMRIGHT", 0, 0)
+    memberPanel:SetWidth(170)
+    memberPanel:SetFrameStrata("DIALOG")
+    memberPanel:SetFrameLevel(frame:GetFrameLevel() + 1)
     memberPanel:EnableMouse(true)
+    memberPanel:HookScript("OnEnter", function()
+        updateWindowAlpha(window)
+    end)
+    memberPanel:HookScript("OnLeave", function()
+        updateWindowAlpha(window)
+    end)
     memberPanel:SetBackdrop({
         bgFile = "Interface/Tooltips/UI-Tooltip-Background",
         edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
@@ -482,7 +519,33 @@ local function createGroupWindow(session)
 
     window.memberTitle = memberPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     window.memberTitle:SetPoint("TOP", memberPanel, "TOP", 0, -8)
-    window.memberTitle:SetText("Members")
+
+    window.memberToggleButton = CreateFrame(
+        "Button", nil, frame, "UIPanelButtonTemplate")
+    window.memberToggleButton:SetSize(22, 18)
+    window.memberToggleButton:SetPoint("TOP", title, "BOTTOM", 70, -2)
+    window.membersExpanded = false
+    window.memberToggleButton:SetScript("OnClick", function()
+        window.membersExpanded = not window.membersExpanded
+        if frame:IsShown() and window.membersExpanded then
+            memberPanel:Show()
+        else
+            memberPanel:Hide()
+        end
+        window:UpdateMembers()
+        updateWindowAlpha(window)
+        if GameTooltip:GetOwner() == window.memberToggleButton then
+            GameTooltip:SetText(window.membersExpanded
+                and "Hide members" or "Show members")
+        end
+    end)
+    window.memberToggleButton:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:SetText(window.membersExpanded
+            and "Hide members" or "Show members")
+        GameTooltip:Show()
+    end)
+    window.memberToggleButton:SetScript("OnLeave", GameTooltip_Hide)
 
     local memberScroll = CreateFrame(
         "ScrollFrame", nil, memberPanel, "FauxScrollFrameTemplate")
@@ -502,7 +565,7 @@ local function createGroupWindow(session)
     TrialChatCommon.RegisterLinkInput(input)
     input:SetHeight(26)
     input:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 14, 14)
-    input:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -176, 14)
+    input:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -14, 14)
     input:HookScript("OnEditFocusGained", function()
         updateWindowAlpha(window)
     end)
@@ -585,13 +648,15 @@ local function createGroupWindow(session)
         end)
 
         self.memberTitle:SetText("Members (" .. #names .. ")")
+        self.onlineMemberCount:SetText("Online members (" .. #names .. ")")
+        self.memberToggleButton:SetText(self.membersExpanded and "<" or ">")
         local visibleRows = math.max(1,
             math.floor(self.memberScroll:GetHeight() / 18))
         FauxScrollFrame_Update(self.memberScroll, #names, visibleRows, 18)
         local offset = FauxScrollFrame_GetOffset(self.memberScroll)
 
         while #self.rows < #names do
-            local row = CreateFrame("Frame", nil, memberPanel)
+            local row = CreateFrame("Button", nil, memberPanel)
             row:SetHeight(18)
             row:SetPoint("TOPLEFT", memberScroll, "TOPLEFT",
                 2, -(#self.rows) * 18)
@@ -600,6 +665,20 @@ local function createGroupWindow(session)
             row.text:SetAllPoints()
             row.text:SetJustifyH("LEFT")
             row.text:SetWordWrap(false)
+            row:RegisterForClicks("RightButtonUp")
+            row:SetScript("OnClick", function(self, button)
+                if button == "RightButton" then
+                    TrialChatCommon.ShowPlayerOptions(
+                        self.memberName, self.memberName, button)
+                end
+            end)
+            row:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+                GameTooltip:SetText("Right-click for player options.")
+                GameTooltip:Show()
+            end)
+            row:SetScript("OnLeave", GameTooltip_Hide)
+            row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
             self.rows[#self.rows + 1] = row
         end
 
@@ -610,6 +689,7 @@ local function createGroupWindow(session)
                 local nameText = nameColor and (nameColor .. member.name .. "|r")
                     or member.name
                 row.text:SetText(nameText)
+                row.memberName = member.name
                 row:Show()
             else
                 row:Hide()
@@ -618,9 +698,16 @@ local function createGroupWindow(session)
     end
 
     frame:HookScript("OnShow", function()
+        if window.membersExpanded then
+            memberPanel:Show()
+        end
         window:UpdateMembers()
     end)
+    frame:HookScript("OnHide", function()
+        memberPanel:Hide()
+    end)
 
+    memberPanel:Hide()
     frame:Hide()
     window:UpdateMembers()
 end

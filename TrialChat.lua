@@ -297,8 +297,15 @@ local function createRecipientRow(index)
     row.label:SetJustifyH("LEFT")
     row.label:SetWordWrap(false)
     row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
-    row:SetScript("OnClick", function(self)
+    row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    row:SetScript("OnClick", function(self, button)
         if self.isSelf then return end
+
+        if button == "RightButton" then
+            TrialChatCommon.ShowPlayerOptions(
+                self.recipientName, self.recipientName, button)
+            return
+        end
 
         local permanentListeners = getPermanentListeners()
         local existingKey = findPermanentListenerKey(self.recipientName)
@@ -311,11 +318,14 @@ local function createRecipientRow(index)
     end)
     row:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-        local tooltipText = self.isSelf
-            and "This is you."
-            or findPermanentListenerKey(self.recipientName)
-                and "Click to stop keeping this listener."
-                or "Click to keep this listener permanently."
+        local tooltipText
+        if self.isSelf then
+            tooltipText = "This is you."
+        elseif findPermanentListenerKey(self.recipientName) then
+            tooltipText = "Left-click to stop keeping this listener.\nRight-click for player options."
+        else
+            tooltipText = "Left-click to keep this listener permanently.\nRight-click for player options."
+        end
         GameTooltip:SetText(tooltipText)
         GameTooltip:Show()
     end)
@@ -382,7 +392,8 @@ end
 local function printMessage(sender, message, color, nameColor, isEmote)
     message = TrialChatCommon.FormatMessageText(message)
     nameColor = isEmote and color or nameColor or color
-    local line = color .. "[" .. date("%H:%M") .. "] " .. nameColor .. sender
+    local line = color .. "[" .. date("%H:%M") .. "] "
+        .. nameColor .. sender
     if isEmote then
         line = line .. " " .. message .. "|r"
     else
@@ -662,10 +673,13 @@ local function createChatWindow()
     chatLog:SetScript("OnHyperlinkClick", function(_, link, text, button)
         TrialChatCommon.HandleHyperlinkClick(link, text, button)
     end)
-    chatLog:SetScript("OnHyperlinkEnter", function(self, link)
+    chatLog:SetScript("OnHyperlinkEnter", function(self, link, text)
         GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
         if string.sub(link or "", 1, 6) == "tcurl:" then
             GameTooltip:SetText("Click to copy URL")
+        elseif string.sub(link or "", 1, 7) == "player:"
+            or string.sub(link or "", 1, 9) == "tcplayer:" then
+            GameTooltip:SetText("Click for player options: " .. (text or "player"))
         else
             GameTooltip:SetHyperlink(link)
         end
@@ -684,7 +698,7 @@ local function createChatWindow()
     end)
     for _, line in ipairs(getChatHistory()) do
         if type(line) == "string" then
-            chatLog:AddMessage(line)
+            chatLog:AddMessage(TrialChatCommon.RemovePlayerLinks(line))
         end
     end
     chatLog:ScrollToBottom()

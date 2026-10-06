@@ -6,6 +6,22 @@ local linkInsertHooked = false
 function TrialChatCommon.RegisterLinkInput(input)
     linkInputs[input] = true
 
+    input:HookScript("OnEditFocusGained", function(self)
+        if ChatFrameUtil and ChatFrameUtil.SetChatFocusOverride then
+            ChatFrameUtil.SetChatFocusOverride(self)
+        end
+    end)
+    local function clearChatFocusOverride(self)
+        if ChatFrameUtil
+            and ChatFrameUtil.GetChatFocusOverride
+            and ChatFrameUtil.GetChatFocusOverride() == self
+            and ChatFrameUtil.ClearChatFocusOverride then
+            ChatFrameUtil.ClearChatFocusOverride()
+        end
+    end
+    input:HookScript("OnEditFocusLost", clearChatFocusOverride)
+    input:HookScript("OnHide", clearChatFocusOverride)
+
     if linkInsertHooked or not ChatFrameUtil or not ChatFrameUtil.InsertLink then
         return
     end
@@ -86,6 +102,21 @@ local function makeURLLink(url)
     return "|cff00ccff|Htcurl:" .. encodedURL .. "|h" .. url .. "|h|r"
 end
 
+local function findHyperlinkEnd(text, position)
+    local targetEnd = string.find(text, "|h", position + 2, true)
+    if not targetEnd then return nil end
+
+    local displayEnd = targetEnd + 2
+    while true do
+        local linkEnd = string.find(text, "|h", displayEnd, true)
+        if not linkEnd then return nil end
+        if string.sub(text, linkEnd - 1, linkEnd - 1) ~= "|" then
+            return linkEnd + 1
+        end
+        displayEnd = linkEnd + 2
+    end
+end
+
 function TrialChatCommon.FormatMessageText(text)
     local result = {}
     local position = 1
@@ -127,8 +158,10 @@ function TrialChatCommon.FormatMessageText(text)
                     result[#result + 1] = makeURLLink(url)
                     position = position + #url
                 else
-                    linkStart, linkEnd =
-                        string.find(text, "|H[^|]+|h[^|]*|h", position)
+                    linkEnd = findHyperlinkEnd(text, position)
+                    if linkEnd then
+                        linkStart = position
+                    end
                 end
                 if not url and linkStart == position then
                     result[#result + 1] = string.sub(text, linkStart, linkEnd)
@@ -201,6 +234,13 @@ local function showURLCopyDialog(url)
 end
 
 function TrialChatCommon.HandleHyperlinkClick(link, text, button)
+    local encodedPlayerName = string.match(link or "", "^tcplayer:(%x+)$")
+    if encodedPlayerName then
+        local playerName = decodeLinkPayload(encodedPlayerName)
+        TrialChatCommon.ShowPlayerOptions(playerName, text, button)
+        return
+    end
+
     local encodedURL = string.match(link or "", "^tcurl:(%x+)$")
     local url = encodedURL and decodeLinkPayload(encodedURL)
     if url and string.match(url, "^https?://") and not string.find(url, "[%c|]") then
@@ -211,11 +251,26 @@ function TrialChatCommon.HandleHyperlinkClick(link, text, button)
     SetItemRef(link, text, button, DEFAULT_CHAT_FRAME)
 end
 
+function TrialChatCommon.ShowPlayerOptions(playerName, displayName, button)
+    if not playerName or playerName == ""
+        or string.find(playerName, "[%c|]") then
+        return
+    end
+
+    SetItemRef("player:" .. playerName, displayName or playerName,
+        button or "LeftButton", DEFAULT_CHAT_FRAME)
+end
+
+function TrialChatCommon.RemovePlayerLinks(text)
+    text = string.gsub(text, "|Htcplayer:%x+|h(.-)|h", "%1", 1)
+    return (string.gsub(text, "|Hplayer:[^|]+|h(.-)|h", "%1", 1))
+end
+
 local emoteDescriptions = {
-    chicken = "With arms flapping, you strut around. Cluck, Cluck, Chicken!",
-    flap = "With arms flapping, you strut around. Cluck, Cluck, Chicken!",
-    strut = "With arms flapping, you strut around. Cluck, Cluck, Chicken!",
-    dance = "You burst into dance.",
+    chicken = "struts around with arms flapping. Cluck, cluck, chicken!",
+    flap = "struts around with arms flapping. Cluck, cluck, chicken!",
+    strut = "struts around with arms flapping. Cluck, cluck, chicken!",
+    dance = "bursts into dance.",
     bow = "bows.",
     wave = "waves.",
     laugh = "laughs.",
@@ -233,7 +288,7 @@ local emoteDescriptions = {
     sigh = "sighs.",
     salute = "salutes.",
     roar = "roars.",
-    flex = "You flex your muscles. Oooooh so strong!",
+    flex = "flexes their muscles. Oooooh so strong!",
     kiss = "blows a kiss.",
     hug = "gives a hug.",
     thanks = "gives thanks.",
@@ -241,7 +296,7 @@ local emoteDescriptions = {
     sleep = "falls asleep.",
     sit = "sits down.",
     rude = "makes a rude gesture.",
-    train = "You make a train noise.",
+    train = "makes a train noise.",
     welcome = "welcomes everyone.",
     goodbye = "waves goodbye.",
     bye = "waves goodbye.",
@@ -251,6 +306,7 @@ local emoteDescriptions = {
     blush = "blushes.",
     confused = "looks confused.",
     cower = "cowers in fear.",
+    poke = "pokes.... somebody.",
     gasp = "gasps.",
     groan = "groans.",
     growl = "growls.",
@@ -258,17 +314,17 @@ local emoteDescriptions = {
     rofl = "rolls on the floor laughing.",
     shy = "acts shy.",
     weep = "weeps.",
-    sob = "cries.",
+    sob = "sobs.",
     sorry = "apologizes.",
     apologize = "apologizes.",
     mad = "raises their fist in anger.",
     angry = "raises their fist in anger.",
-    strong = "You flex your muscles. Oooooh so strong!",
+    strong = "flexes their muscles. Oooooh so strong!",
     farewell = "waves goodbye.",
     hi = "greets everyone with a hearty hello!",
     hello = "greets everyone with a hearty hello!",
-    grats = "congratulates everyone around you.",
-    congrats = "congratulates everyone around you.",
+    grats = "congratulates everyone nearby.",
+    congrats = "congratulates everyone nearby.",
 }
 
 function TrialChatCommon.ParseEmote(message)
@@ -286,14 +342,17 @@ function TrialChatCommon.ParseEmote(message)
         return argument, true, nil, nil
     end
 
+    local description = emoteDescriptions[command]
+    if not description then
+        return message, false
+    end
+
     local token = _G.hash_EmoteTokenList
         and _G.hash_EmoteTokenList["/" .. string.upper(command)]
     if not token then
         return message, false
     end
 
-    local description = emoteDescriptions[command]
-        or ("performs /" .. command .. ".")
     return description, true, token, argument ~= "" and argument or nil
 end
 
