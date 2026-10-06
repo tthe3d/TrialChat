@@ -1,5 +1,5 @@
 local PREFIX = "TrialChat"
-_G.BINDING_CATEGORY_TRIALCHAT = "TrialChat"
+_G.BINDING_HEADER_TRIALCHAT = "TrialChat"
 local MESSAGE_TAG = "M:"
 local PING = "C:PING"
 local PONG = "C:PONG"
@@ -45,9 +45,44 @@ local updateChatContentLayout
 local RECIPIENT_ROW_HEIGHT = 18
 local CHAT_WINDOW_IDLE_ALPHA = 0.45
 local CHAT_MESSAGE_VISIBLE_SECONDS = 10
+local CHAT_WINDOW_FADE_SECONDS = 0.4
+local chatWindowAlphaAnimations = {}
 local lastChatMessageAt
 if fullPlayerName and playerRealm and playerRealm ~= "" then
     fullPlayerName = fullPlayerName .. "-" .. playerRealm
+end
+
+local function setWindowAlphaSmooth(frame, targetAlpha)
+    if not frame then return end
+
+    local animation = chatWindowAlphaAnimations[frame]
+    if not animation then
+        local animationGroup = frame:CreateAnimationGroup()
+        local alphaAnimation = animationGroup:CreateAnimation("Alpha")
+        alphaAnimation:SetDuration(CHAT_WINDOW_FADE_SECONDS)
+        alphaAnimation:SetSmoothing("OUT")
+        animation = {
+            group = animationGroup,
+            animation = alphaAnimation,
+        }
+        chatWindowAlphaAnimations[frame] = animation
+    end
+
+    if animation.targetAlpha == targetAlpha
+        and (animation.group:IsPlaying() or frame:GetAlpha() == targetAlpha) then
+        return
+    end
+
+    local currentAlpha = frame:GetAlpha()
+    if animation.group:IsPlaying() then
+        animation.group:Stop()
+        frame:SetAlpha(currentAlpha)
+    end
+
+    animation.targetAlpha = targetAlpha
+    animation.animation:SetFromAlpha(currentAlpha)
+    animation.animation:SetToAlpha(targetAlpha)
+    animation.group:Play()
 end
 
 local function updateChatWindowAlpha()
@@ -64,9 +99,9 @@ local function updateChatWindowAlpha()
     local alpha = (mouseOverChat or mouseOverListeners or inputHasFocus or recentMessage)
         and 1 or CHAT_WINDOW_IDLE_ALPHA
 
-    chatWindow:SetAlpha(alpha)
+    setWindowAlphaSmooth(chatWindow, alpha)
     if recipientPanel then
-        recipientPanel:SetAlpha(alpha)
+        setWindowAlphaSmooth(recipientPanel, alpha)
     end
 end
 
@@ -643,10 +678,10 @@ local function createChatWindow()
     chatInput:SetScript("OnEnterPressed", function(self)
         local message = self:GetText()
         self:SetText("")
-        self:ClearFocus()
         if strtrim(message or "") ~= "" then
             sendTrialChatMessage(message)
         end
+        self:SetFocus()
     end)
     chatInput:SetScript("OnEscapePressed", function(self)
         self:ClearFocus()

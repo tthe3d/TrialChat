@@ -5,13 +5,15 @@ local MAX_PASSWORD_BYTES = 32
 local MAX_GROUP_MESSAGE_BYTES = 200
 local MEMBER_TIMEOUT = 90
 local MEMBER_UPDATE_INTERVAL = 30
+local GROUP_WINDOW_FADE_SECONDS = 0.4
+local _, playerClass = UnitClass("player")
 
 local Groups = {}
 TrialChatGroups = Groups
 
 local activeGroups = {}
 local pendingJoins = {}
-local nearbyPlayers = {}
+local windowAlphaAnimations = {}
 local playerName, playerRealm = UnitFullName("player")
 local selfName = playerName
 if selfName and playerRealm and playerRealm ~= "" then
@@ -57,13 +59,38 @@ local function namesMatch(left, right)
     return leftShort ~= nil and normalizeName(leftShort) == normalizeName(rightShort)
 end
 
-local function addMember(session, name)
+local function findMemberKey(session, name)
+    for key, member in pairs(session.members) do
+        if namesMatch(member.name, name) then
+            return key
+        end
+    end
+end
+
+local function hasMember(session, name)
+    return findMemberKey(session, name) ~= nil
+end
+
+local function getClassColor(classFile)
+    local color = classFile and RAID_CLASS_COLORS[classFile]
+    if not color then return nil end
+    if color.colorStr then return "|c" .. color.colorStr end
+    return string.format("|cff%02x%02x%02x",
+        math.floor(color.r * 255),
+        math.floor(color.g * 255),
+        math.floor(color.b * 255))
+end
+
+local function addMember(session, name, classFile)
     if not name or name == "" then return end
 
-    local key = normalizeName(name)
+    local key = findMemberKey(session, name) or normalizeName(name)
+    local existing = session.members[key]
     session.members[key] = {
         name = name,
         lastSeen = GetTime(),
+        classFile = classFile or (existing and existing.classFile)
+            or (isSelf(name) and playerClass),
     }
     if session.window then
         session.window:UpdateMembers()
@@ -73,7 +100,8 @@ end
 local function removeMember(session, name)
     if not name or name == "" then return end
 
-    session.members[normalizeName(name)] = nil
+    local key = findMemberKey(session, name)
+    if key then session.members[key] = nil end
     if session.window then
         session.window:UpdateMembers()
     end
@@ -87,18 +115,54 @@ local function sendGroupProtocol(session, kind, target, body)
         return false
     end
 
-    C_ChatInfo.SendAddonMessage(PREFIX, payload, "WHISPER", target)
-    return true
+    local sent, err = pcall(
+        C_ChatInfo.SendAddonMessage, PREFIX, payload, "WHISPER", target)
+    if not sent then
+        showNotice("Could not send a group message to " .. target .. ": " .. err)
+    end
+    return sent
 end
 
 local function sendToMembers(session, kind, body, exceptName)
     local sent = false
     for key, member in pairs(session.members) do
-        if key ~= getSelfKey() and key ~= normalizeName(exceptName) then
+        if not namesMatch(member.name, selfName or UnitName("player"))
+            and not (exceptName and namesMatch(member.name, exceptName)) then
             sent = sendGroupProtocol(session, kind, member.name, body) or sent
         end
     end
     return sent
+end
+
+local function setWindowAlphaSmooth(frame, targetAlpha)
+    local animation = windowAlphaAnimations[frame]
+    if not animation then
+        local animationGroup = frame:CreateAnimationGroup()
+        local alphaAnimation = animationGroup:CreateAnimation("Alpha")
+        alphaAnimation:SetDuration(GROUP_WINDOW_FADE_SECONDS)
+        alphaAnimation:SetSmoothing("OUT")
+        animation = {
+            group = animationGroup,
+            animation = alphaAnimation,
+        }
+        windowAlphaAnimations[frame] = animation
+    end
+
+    if animation.targetAlpha == targetAlpha
+        and (animation.group:IsPlaying() or frame:GetAlpha() == targetAlpha) then
+        return
+    end
+
+    local currentAlpha = frame:GetAlpha()
+    if animation.group:IsPlaying() then
+        animation.group:Stop()
+        frame:SetAlpha(currentAlpha)
+    end
+
+    animation.targetAlpha = targetAlpha
+    animation.animation:SetFromAlpha(currentAlpha)
+    animation.animation:SetToAlpha(targetAlpha)
+    animation.group:Play()
 end
 
 local function updateWindowAlpha(window)
@@ -108,7 +172,8 @@ local function updateWindowAlpha(window)
     local inputHasFocus = window.input and window.input:HasFocus()
     local recentMessage = window.lastMessageAt
         and GetTime() - window.lastMessageAt < 10
-    window.frame:SetAlpha((mouseOver or inputHasFocus or recentMessage) and 1 or 0.45)
+    setWindowAlphaSmooth(
+        window.frame, (mouseOver or inputHasFocus or recentMessage) and 1 or 0.45)
 end
 
 local function addGroupMessage(session, sender, message)
@@ -118,7 +183,10 @@ local function addGroupMessage(session, sender, message)
     addMember(session, sender)
     local displayMessage = string.gsub(message, "|", "||")
     local shortSender = string.match(sender, "^([^-]+)") or sender
-    window.log:AddMessage("|cffffcc00" .. shortSender .. "|r: " .. displayMessage)
+    local memberKey = findMemberKey(session, sender)
+    local member = memberKey and session.members[memberKey]
+    local nameColor = getClassColor(member and member.classFile) or "|cffffcc00"
+    window.log:AddMessage(nameColor .. shortSender .. "|r: " .. displayMessage)
     window.log:ScrollToBottom()
     window.lastMessageAt = GetTime()
     updateWindowAlpha(window)
@@ -256,21 +324,29 @@ local function createGroupWindow(session)
     input:SetScript("OnEnterPressed", function(self)
         local message = strtrim(self:GetText() or "")
         self:SetText("")
-        self:ClearFocus()
-        if message == "" then return end
-        if #message > MAX_GROUP_MESSAGE_BYTES then
-            showNotice("Group messages are limited to " .. MAX_GROUP_MESSAGE_BYTES .. " bytes.")
+        if message == "" then
+            self:SetFocus()
             return
         end
-        sendToMembers(session, "MSG", message)
+        if #message > MAX_GROUP_MESSAGE_BYTES then
+            showNotice("Group messages are limited to " .. MAX_GROUP_MESSAGE_BYTES .. " bytes.")
+            self:SetFocus()
+            return
+        end
         addGroupMessage(session, selfName or UnitName("player"), message)
+        sendToMembers(session, "MSG", message)
+        self:SetFocus()
     end)
     input:SetScript("OnEscapePressed", function(self)
         self:ClearFocus()
     end)
 
-    local resizeButton = CreateFrame("Button", nil, frame, "PanelResizeButton")
+    local resizeButton = CreateFrame("Button", nil, frame)
+    resizeButton:SetSize(16, 16)
     resizeButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -6, 6)
+    resizeButton:SetNormalTexture("Interface/ChatFrame/UI-ChatIM-SizeGrabber-Up")
+    resizeButton:SetHighlightTexture("Interface/ChatFrame/UI-ChatIM-SizeGrabber-Highlight")
+    resizeButton:SetPushedTexture("Interface/ChatFrame/UI-ChatIM-SizeGrabber-Down")
     resizeButton:SetScript("OnMouseDown", function()
         frame:StartSizing("BOTTOMRIGHT")
     end)
@@ -283,7 +359,11 @@ local function createGroupWindow(session)
     function window:UpdateMembers()
         local names = {}
         for key, member in pairs(session.members) do
-            names[#names + 1] = { key = key, name = member.name }
+            names[#names + 1] = {
+                key = key,
+                name = member.name,
+                classFile = member.classFile,
+            }
         end
         table.sort(names, function(left, right)
             return strlower(left.name) < strlower(right.name)
@@ -311,13 +391,20 @@ local function createGroupWindow(session)
         for index, row in ipairs(self.rows) do
             local member = names[offset + index]
             if member and index <= visibleRows then
-                row.text:SetText(member.name)
+                local nameColor = getClassColor(member.classFile)
+                local nameText = nameColor and (nameColor .. member.name .. "|r")
+                    or member.name
+                row.text:SetText(nameText)
                 row:Show()
             else
                 row:Hide()
             end
         end
     end
+
+    frame:HookScript("OnShow", function()
+        window:UpdateMembers()
+    end)
 
     frame:Hide()
     window:UpdateMembers()
@@ -558,9 +645,9 @@ local function openGroupDialog(mode, preset)
     dialog.nameInput:SetFocus()
 end
 
-local function leaveGroup(id)
+local function disconnectSession(id)
     local session = activeGroups[id]
-    if not session then return end
+    if not session then return nil end
 
     sendToMembers(session, "BYE")
     activeGroups[id] = nil
@@ -570,7 +657,28 @@ local function leaveGroup(id)
         session.window.input:ClearFocus()
         session.window:UpdateMembers()
     end
-    showNotice("Left " .. session.name .. ". It remains in your saved groups.")
+    return session
+end
+
+local function disconnectGroup(id)
+    local session = disconnectSession(id)
+    if not session then return end
+    showNotice("Disconnected from " .. session.name
+        .. ". It remains in your saved groups.")
+end
+
+local function exitGroup(id)
+    local savedGroup = getSavedGroups()[id]
+    if not savedGroup or savedGroup.isCreator or not savedGroup.memberName then
+        showNotice("Only non-creator members can exit a saved group.")
+        return
+    end
+
+    local session = disconnectSession(id)
+    pendingJoins[id] = nil
+    getSavedGroups()[id] = nil
+    showNotice("Exited " .. (session and session.name or savedGroup.name)
+        .. " and removed it from your saved groups.")
 end
 
 local function deleteGroup(id)
@@ -612,19 +720,38 @@ local function createMenuRow(index)
         menu:Hide()
         self.action()
     end)
-    row.leaveButton = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-    row.leaveButton:SetSize(48, 18)
-    row.leaveButton:SetPoint("RIGHT", row, "RIGHT", -2, 0)
-    row.leaveButton:SetText("Leave")
-    row.leaveButton:SetScript("OnClick", function(self)
-        menu:Hide()
-        StaticPopup_Show("TRIALCHAT_CONFIRM_LEAVE", self:GetParent().groupName,
-            nil, self:GetParent().groupId)
+    row.connectButton = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+    row.connectButton:SetSize(76, 18)
+    row.connectButton:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+    row.connectButton:SetScript("OnClick", function(self)
+        local parent = self:GetParent()
+        local savedGroup = parent.savedGroup
+        if activeGroups[parent.groupId] then
+            menu:Hide()
+            StaticPopup_Show("TRIALCHAT_CONFIRM_DISCONNECT",
+                parent.groupName, nil, parent.groupId)
+        else
+            menu:Hide()
+            parent.connect(savedGroup)
+        end
     end)
-    row.leaveButton:Hide()
+    row.connectButton:Hide()
+
+    row.exitButton = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+    row.exitButton:SetSize(48, 18)
+    row.exitButton:SetPoint("RIGHT", row.connectButton, "LEFT", -2, 0)
+    row.exitButton:SetText("Exit")
+    row.exitButton:SetScript("OnClick", function(self)
+        local parent = self:GetParent()
+        menu:Hide()
+        StaticPopup_Show("TRIALCHAT_CONFIRM_EXIT", parent.groupName,
+            nil, parent.groupId)
+    end)
+    row.exitButton:Hide()
+
     row.deleteButton = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
     row.deleteButton:SetSize(52, 18)
-    row.deleteButton:SetPoint("RIGHT", row.leaveButton, "LEFT", -2, 0)
+    row.deleteButton:SetPoint("RIGHT", row.connectButton, "LEFT", -2, 0)
     row.deleteButton:SetText("Delete")
     row.deleteButton:SetScript("OnClick", function(self)
         menu:Hide()
@@ -636,12 +763,24 @@ local function createMenuRow(index)
 end
 
 local function createMenu()
-    StaticPopupDialogs.TRIALCHAT_CONFIRM_LEAVE = {
-        text = "Leave group %s?",
+    StaticPopupDialogs.TRIALCHAT_CONFIRM_DISCONNECT = {
+        text = "Disconnect from group %s? It will remain in your saved groups.",
         button1 = YES,
         button2 = NO,
         OnAccept = function(self)
-            leaveGroup(self.data)
+            disconnectGroup(self.data)
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
+    StaticPopupDialogs.TRIALCHAT_CONFIRM_EXIT = {
+        text = "Exit group %s and remove it from your saved groups?",
+        button1 = YES,
+        button2 = NO,
+        OnAccept = function(self)
+            exitGroup(self.data)
         end,
         timeout = 0,
         whileDead = true,
@@ -735,29 +874,38 @@ function Groups:ToggleMenu(anchor)
         local group = groups[index]
         if group then
             local savedGroup = group
+            local groupRow = row
             row.groupId = group.id
             row.groupName = group.name
-            row.text:SetText(group.name)
-            row.action = function()
-                local active = activeGroups[savedGroup.id]
+            row.savedGroup = savedGroup
+            row.connect = function(groupToConnect)
+                local active = activeGroups[groupToConnect.id]
                 if active then
                     active.window.frame:Show()
                     active.window.input:SetFocus()
-                elseif savedGroup.isCreator then
-                    createGroup(savedGroup.name, savedGroup.password, savedGroup)
-                elseif savedGroup.memberName then
-                    joinGroup(savedGroup.name, savedGroup.password,
-                        savedGroup.memberName, savedGroup)
+                elseif groupToConnect.isCreator then
+                    createGroup(groupToConnect.name, groupToConnect.password,
+                        groupToConnect)
+                elseif groupToConnect.memberName then
+                    joinGroup(groupToConnect.name, groupToConnect.password,
+                        groupToConnect.memberName, groupToConnect)
                 else
-                    openGroupDialog("join", savedGroup)
+                    openGroupDialog("join", groupToConnect)
                 end
             end
-            row.leaveButton:SetShown(activeGroups[group.id] ~= nil)
+            row.text:SetText(group.name)
+            row.action = function()
+                groupRow.connect(savedGroup)
+            end
+            local isConnected = activeGroups[group.id] ~= nil
+            row.connectButton:SetText(isConnected and "Disconnect" or "Connect")
+            row.connectButton:SetShown(true)
+            row.exitButton:SetShown(not savedGroup.isCreator)
             row.deleteButton:SetShown(savedGroup.isCreator)
             row.text:ClearAllPoints()
             row.text:SetPoint("LEFT", row, "LEFT", 4, 0)
             row.text:SetPoint("RIGHT", row, "RIGHT",
-                savedGroup.isCreator and -110 or -56, 0)
+                savedGroup.isCreator and -138 or -134, 0)
             row:Show()
         else
             row:Hide()
@@ -804,12 +952,20 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
             addMember(session, sender)
             sendGroupProtocol(session, "WELCOME", sender,
                 session.creatorName or (session.isCreator and selfName) or "")
+            sendGroupProtocol(session, "CLASS", sender, playerClass)
             for key, member in pairs(session.members) do
-                if key ~= getSelfKey() and key ~= normalizeName(sender) then
+                if not namesMatch(member.name, selfName or UnitName("player"))
+                    and not namesMatch(member.name, sender) then
                     sendGroupProtocol(session, "MEMBER", sender, member.name)
+                    if member.classFile then
+                        sendGroupProtocol(session, "CLASS", sender, member.classFile)
+                    end
                 end
             end
             sendToMembers(session, "MEMBER", sender)
+            if playerClass then
+                sendToMembers(session, "CLASS", playerClass, sender)
+            end
         end
         return
     end
@@ -825,7 +981,7 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
     end
 
     if kind == "MEMBER" then
-        if session and session.members[normalizeName(sender)] then
+        if session and hasMember(session, sender) then
             addMember(session, body)
         elseif pending and namesMatch(sender, pending.targetName) then
             if body ~= "" then
@@ -836,8 +992,23 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
         return
     end
 
+    if kind == "CLASS" then
+        if session and hasMember(session, sender)
+            and RAID_CLASS_COLORS[body] then
+            local memberKey = findMemberKey(session, sender)
+            local member = memberKey and session.members[memberKey]
+            if member then
+                member.classFile = body
+                if session.window then
+                    session.window:UpdateMembers()
+                end
+            end
+        end
+        return
+    end
+
     if kind == "BYE" then
-        if session and session.members[normalizeName(sender)] then
+        if session and hasMember(session, sender) then
             removeMember(session, sender)
         end
         return
@@ -864,7 +1035,7 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
         return
     end
 
-    if kind == "MSG" and session and session.members[normalizeName(sender)] then
+    if kind == "MSG" and session and hasMember(session, sender) then
         addGroupMessage(session, sender, body)
     end
 end)
@@ -874,10 +1045,14 @@ C_Timer.NewTicker(MEMBER_UPDATE_INTERVAL, function()
     for _, session in pairs(activeGroups) do
         addMember(session, selfName or UnitName("player"))
         sendToMembers(session, "MEMBER", selfName or UnitName("player"))
+        if playerClass then
+            sendToMembers(session, "CLASS", playerClass)
+        end
 
         local expired = {}
         for key, member in pairs(session.members) do
-            if key ~= getSelfKey() and now - member.lastSeen > MEMBER_TIMEOUT then
+            if not namesMatch(member.name, selfName or UnitName("player"))
+                and now - member.lastSeen > MEMBER_TIMEOUT then
                 expired[#expired + 1] = key
             end
         end
