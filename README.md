@@ -1,21 +1,27 @@
-This add-on is still in the making. It allows characters (yes even trials) in World of Warcraft Retail to talk to other nearby players (if they have the add-on).
+# 💬 TrialChat
 
-  
-How to use:
+> **Status:** ⚠️ This add-on is still in development.
 
-Type /tc to show/hide or click the mini-map button. (There is also a shortcut key option in the keybind menu.)
+This World of Warcraft Retail add-on allows characters (including trial accounts) to talk to other nearby players who also have the add-on installed.
 
-Can add permanent active listeners in case you wanna go some other zone and still talk.
+---
 
-Group chat is working now with added group chat history sync between members.
+## 🚀 How to Use
 
-Group chat sound notification.
+* **Toggle Window:** Type `/tc` in your chat or click the mini-map button to show/hide the interface.
+* **Keybind Support:** A shortcut key option is also available under the game's official keybind menu.
 
-Added emotes. (almost all of them)
+---
 
-Added support for clicking links (webpage,items,quests.... even musician songs).
+## ✨ Features
 
-And a bunch of other stuff...
+* **Proximity Chat:** Talk with nearby players across all character types.
+* **Permanent Listeners:** Add permanently active listeners to stay in touch even when you travel to different zones.
+* **Group Chat:** Full group chat functionality, including **chat history synchronization** between all group members.
+* **Sound Notifications:** Never miss a message with integrated group chat audio alerts.
+* **Rich Media Support:** Interactive clickable links for **webpages, items, quests**, and even **Musician** add-on songs.
+* **Emotes:** Support for almost all standard WoW emotes.
+* ...and a bunch of other stuff!
 
 
 <img width="500" height="325" alt="Screenshot 2026-10-05 at 21 45 44" src="https://github.com/user-attachments/assets/8bac1a11-3fd9-4993-97ee-33ae4f19aef6" />. 
@@ -24,5 +30,8 @@ And a bunch of other stuff...
 
 <img width="550" height="354" alt="Screenshot 2026-10-07 at 3 28 30" src="https://github.com/user-attachments/assets/cf67cf82-6a42-4eb6-98c0-8a9520a03bbb" />. 
 
-Ty Tinky for testing with me <3.
+---
 
+## ❤️ Acknowledgements
+
+Thank you **Tînky** for testing with me!
