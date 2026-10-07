@@ -19,7 +19,9 @@ And a bunch of other stuff...
 
 
 <img width="500" height="325" alt="Screenshot 2026-10-05 at 21 45 44" src="https://github.com/user-attachments/assets/8bac1a11-3fd9-4993-97ee-33ae4f19aef6" />. 
+
 <img width="414" height="291" alt="Screenshot 2026-10-07 at 3 29 50" src="https://github.com/user-attachments/assets/61540dbe-4a9d-4c1b-bf01-f3541135dc96" />. 
+
 <img width="550" height="354" alt="Screenshot 2026-10-07 at 3 28 30" src="https://github.com/user-attachments/assets/cf67cf82-6a42-4eb6-98c0-8a9520a03bbb" />. 
 
 Ty Tinky for testing with me <3.
