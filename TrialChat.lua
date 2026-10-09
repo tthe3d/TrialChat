@@ -20,6 +20,8 @@ local activeListeners = {}
 local lastPingAt = {}
 local pendingPings = {}
 local pendingIncomingMessages = {}
+local recentIncomingMessages = {}
+local INCOMING_MESSAGE_DEDUP_SECONDS = 1
 local playerName = UnitName("player")
 local fullPlayerName, playerRealm = UnitFullName("player")
 local normalizedPlayerRealm = GetNormalizedRealmName and GetNormalizedRealmName()
@@ -426,6 +428,7 @@ local function printIncomingMessage(
     label, sender, message, color, nameColor, senderKey, isEmote)
     local key = normalizeName(senderKey or sender) .. "\0" .. message
         .. "\0" .. tostring(isEmote)
+    local now = GetTime()
     local pending = pendingIncomingMessages[key]
     local isGroupMessage = label == "Party" or label == "Raid"
     local isNearbyMessage = label == "Nearby"
@@ -442,12 +445,28 @@ local function printIncomingMessage(
             return
         end
 
+        if now - pending.receivedAt <= INCOMING_MESSAGE_DEDUP_SECONDS then
+            return
+        end
+
         if pendingIncomingMessages[key] == pending then
             pendingIncomingMessages[key] = nil
             printMessage(pending.sender, pending.message,
                 pending.color, pending.nameColor, pending.isEmote)
         end
+    elseif recentIncomingMessages[key]
+        and now - recentIncomingMessages[key].receivedAt
+            <= INCOMING_MESSAGE_DEDUP_SECONDS then
+        return
     end
+
+    local recent = { receivedAt = now }
+    recentIncomingMessages[key] = recent
+    C_Timer.After(INCOMING_MESSAGE_DEDUP_SECONDS, function()
+        if recentIncomingMessages[key] == recent then
+            recentIncomingMessages[key] = nil
+        end
+    end)
 
     pending = {
         sender = sender,

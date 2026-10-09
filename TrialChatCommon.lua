@@ -288,10 +288,6 @@ function TrialChatCommon.ParseEmote(message)
 
     local token = _G.hash_EmoteTokenList
         and _G.hash_EmoteTokenList["/" .. string.upper(command)]
-    if not token then
-        return message, false
-    end
-
     return description, true, token, argument ~= "" and argument or nil
 end
 
