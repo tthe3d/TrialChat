@@ -1,7 +1,113 @@
 TrialChatCommon = {}
 
+local playerName
+local playerRealm
+local fullPlayerName
+local normalizedPlayerRealm
+local playerClass
 local linkInputs = {}
 local linkInsertHooked = false
+
+function TrialChatCommon.RefreshPlayerIdentity()
+    playerName = UnitName("player")
+    fullPlayerName, playerRealm = UnitFullName("player")
+    normalizedPlayerRealm = GetNormalizedRealmName and GetNormalizedRealmName()
+    _, playerClass = UnitClass("player")
+    if fullPlayerName and playerRealm and playerRealm ~= "" then
+        fullPlayerName = fullPlayerName .. "-" .. playerRealm
+    end
+end
+
+function TrialChatCommon.GetPlayerName()
+    return playerName
+end
+
+function TrialChatCommon.GetPlayerFullName()
+    return fullPlayerName or playerName
+end
+
+function TrialChatCommon.GetPlayerClass()
+    return playerClass
+end
+
+function TrialChatCommon.GetPlayerRealm()
+    return playerRealm
+end
+
+function TrialChatCommon.NormalizeName(name)
+    return name and strlower(name) or nil
+end
+
+function TrialChatCommon.ShortName(name)
+    return string.match(name or "", "^([^-]+)") or name
+end
+
+function TrialChatCommon.NormalizeCharacterName(name)
+    local normalized = TrialChatCommon.NormalizeName(name)
+    if normalized and name and not string.find(name, "-", 1, true)
+        and playerRealm and playerRealm ~= "" then
+        return normalized .. "-" .. TrialChatCommon.NormalizeName(playerRealm)
+    end
+    return normalized
+end
+
+function TrialChatCommon.NormalizeRealm(realm)
+    return TrialChatCommon.NormalizeName((string.gsub(realm or "", "[%s']", "")))
+end
+
+function TrialChatCommon.IsSelf(sender)
+    if not sender or sender == "" then return false end
+
+    local senderKey = TrialChatCommon.NormalizeName(sender)
+    if senderKey == TrialChatCommon.NormalizeName(fullPlayerName) then
+        return true
+    end
+
+    local senderShort, senderRealm = string.match(sender, "^([^-]+)%-(.+)$")
+    if not senderShort then
+        return senderKey == TrialChatCommon.NormalizeName(playerName)
+    end
+    if TrialChatCommon.NormalizeName(senderShort)
+        ~= TrialChatCommon.NormalizeName(playerName) then
+        return false
+    end
+
+    local currentRealm = normalizedPlayerRealm or playerRealm
+    if not currentRealm or currentRealm == "" then return false end
+    return TrialChatCommon.NormalizeRealm(senderRealm)
+        == TrialChatCommon.NormalizeRealm(currentRealm)
+end
+
+function TrialChatCommon.NamesMatch(left, right)
+    if TrialChatCommon.NormalizeName(left) == TrialChatCommon.NormalizeName(right) then
+        return true
+    end
+    if string.find(left or "", "-", 1, true)
+        and string.find(right or "", "-", 1, true) then
+        return false
+    end
+
+    local leftShort = string.match(left or "", "^([^-]+)")
+    local rightShort = string.match(right or "", "^([^-]+)")
+    return leftShort ~= nil
+        and TrialChatCommon.NormalizeName(leftShort)
+            == TrialChatCommon.NormalizeName(rightShort)
+end
+
+function TrialChatCommon.GetClassColor(classFile)
+    local classColor = classFile and RAID_CLASS_COLORS[classFile]
+    if not classColor then return nil end
+    if classColor.colorStr then
+        return "|c" .. classColor.colorStr
+    end
+
+    return string.format("|cff%02x%02x%02x",
+        math.floor(classColor.r * 255),
+        math.floor(classColor.g * 255),
+        math.floor(classColor.b * 255))
+end
+
+TrialChatCommon.RefreshPlayerIdentity()
 
 function TrialChatCommon.RegisterLinkInput(input)
     linkInputs[input] = true
@@ -64,23 +170,14 @@ function TrialChatCommon.EncodeMessageMarkup(text)
 end
 
 function TrialChatCommon.DecodeMessageMarkup(text)
-    local result = {}
-    local position = 1
-
-    while position <= #text do
-        if string.sub(text, position, position + 1) == "~~" then
-            result[#result + 1] = "~"
-            position = position + 2
-        elseif string.sub(text, position, position + 1) == "~p" then
-            result[#result + 1] = "|"
-            position = position + 2
-        else
-            result[#result + 1] = string.sub(text, position, position)
-            position = position + 1
+    return (string.gsub(text, "~.", function(escape)
+        if escape == "~~" then
+            return "~"
+        elseif escape == "~p" then
+            return "|"
         end
-    end
-
-    return table.concat(result)
+        return escape
+    end))
 end
 
 local function encodeLinkPayload(text)

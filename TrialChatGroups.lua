@@ -8,23 +8,23 @@ local MAX_HISTORY_SYNC_MESSAGES = 50
 local HISTORY_CHUNK_BYTES = 170
 local MEMBER_TIMEOUT = 90
 local MEMBER_UPDATE_INTERVAL = 30
-local _, playerClass = UnitClass("player")
-
 local Groups = {}
 TrialChatGroups = Groups
 
 local activeGroups = {}
 local pendingJoins = {}
-local nearbyPlayers = {}
-local playerName, playerRealm = UnitFullName("player")
-local selfName = playerName
-if selfName and playerRealm and playerRealm ~= "" then
-    selfName = selfName .. "-" .. playerRealm
+local pendingGroupSaves = {}
+local GROUP_SAVE_INTERVAL = 5
+local selfName = TrialChatCommon.GetPlayerFullName()
+local playerClass = TrialChatCommon.GetPlayerClass()
+
+local function refreshIdentity()
+    TrialChatCommon.RefreshPlayerIdentity()
+    selfName = TrialChatCommon.GetPlayerFullName()
+    playerClass = TrialChatCommon.GetPlayerClass()
 end
 
-local function normalizeName(name)
-    return strlower(name or "")
-end
+local normalizeName = TrialChatCommon.NormalizeName
 
 local function getSavedGroups()
     TrialChatDB = TrialChatDB or {}
@@ -46,26 +46,8 @@ local function showNotice(message)
     print("|cffff7d0a[TrialChat Groups]|r " .. message)
 end
 
-local function getSelfKey()
-    return normalizeName(selfName or UnitName("player"))
-end
-
-local function isSelf(name)
-    local key = normalizeName(name)
-    return key == getSelfKey() or key == normalizeName(UnitName("player"))
-end
-
-local function namesMatch(left, right)
-    if normalizeName(left) == normalizeName(right) then return true end
-    if string.find(left or "", "-", 1, true)
-        and string.find(right or "", "-", 1, true) then
-        return false
-    end
-
-    local leftShort = string.match(left or "", "^([^-]+)")
-    local rightShort = string.match(right or "", "^([^-]+)")
-    return leftShort ~= nil and normalizeName(leftShort) == normalizeName(rightShort)
-end
+local isSelf = TrialChatCommon.IsSelf
+local namesMatch = TrialChatCommon.NamesMatch
 
 local function findMemberKey(session, name)
     for key, member in pairs(session.members) do
@@ -79,8 +61,24 @@ local function hasMember(session, name)
     return findMemberKey(session, name) ~= nil
 end
 
-local saveGroup
+local persistGroup
 local sendHistoryToMember
+
+local function queueGroupSave(session)
+    if not session or activeGroups[session.id] ~= session then return end
+    pendingGroupSaves[session.id] = session
+end
+
+local function flushGroupSaves()
+    for id, session in pairs(pendingGroupSaves) do
+        pendingGroupSaves[id] = nil
+        if persistGroup then
+            persistGroup(session)
+        end
+    end
+end
+
+local saveGroup = queueGroupSave
 
 local function addKnownMember(session, name)
     if not name or name == "" or isSelf(name) then return end
@@ -89,15 +87,7 @@ local function addKnownMember(session, name)
     session.reconnectName = name
 end
 
-local function getClassColor(classFile)
-    local color = classFile and RAID_CLASS_COLORS[classFile]
-    if not color then return nil end
-    if color.colorStr then return "|c" .. color.colorStr end
-    return string.format("|cff%02x%02x%02x",
-        math.floor(color.r * 255),
-        math.floor(color.g * 255),
-        math.floor(color.b * 255))
-end
+local getClassColor = TrialChatCommon.GetClassColor
 
 local function addMember(session, name, classFile)
     if not name or name == "" then return end
@@ -233,6 +223,57 @@ local function rebuildGroupLog(session)
     window.log:ScrollToBottom()
 end
 
+local function ensureHistoryIndex(session)
+    if session.historyIds then return end
+    session.historyIds = {}
+    for _, item in ipairs(session.history or {}) do
+        if type(item) == "table" and item.id then
+            session.historyIds[item.id] = true
+        end
+    end
+end
+
+local function historyLessThan(left, right)
+    local leftTimestamp = type(left) == "table" and left.timestamp or 0
+    local rightTimestamp = type(right) == "table" and right.timestamp or 0
+    if leftTimestamp ~= rightTimestamp then
+        return leftTimestamp < rightTimestamp
+    end
+    local leftId = type(left) == "table" and left.id or tostring(left)
+    local rightId = type(right) == "table" and right.id or tostring(right)
+    return leftId < rightId
+end
+
+local function insertHistoryEntry(session, entry)
+    local history = session.history
+    local insertAt = #history + 1
+    for index = #history, 1, -1 do
+        if not historyLessThan(entry, history[index]) then
+            insertAt = index + 1
+            break
+        end
+        insertAt = index
+    end
+    table.insert(history, insertAt, entry)
+    if entry.id then
+        session.historyIds[entry.id] = true
+    end
+
+    local droppedEntry = false
+    while #history > MAX_CHAT_HISTORY do
+        local removed = table.remove(history, 1)
+        if type(removed) == "table" and removed.id then
+            session.historyIds[removed.id] = nil
+        end
+        if removed == entry then
+            droppedEntry = true
+        end
+        insertAt = insertAt - 1
+    end
+    if droppedEntry then return nil end
+    return insertAt
+end
+
 local function addGroupMessage(
     session, sender, message, isEmote, messageId, timestamp, isHistorical,
     shouldNotify)
@@ -243,12 +284,11 @@ local function addGroupMessage(
     end
     message = TrialChatCommon.NormalizeMessageMarkup(message)
     session.history = type(session.history) == "table" and session.history or {}
+    ensureHistoryIndex(session)
 
     if messageId then
-        for _, item in ipairs(session.history) do
-            if type(item) == "table" and item.id == messageId then
-                return false
-            end
+        if session.historyIds[messageId] then
+            return false
         end
     else
         session.messageCounter = (session.messageCounter or 0) + 1
@@ -267,33 +307,26 @@ local function addGroupMessage(
         isEmote = isEmote,
         timestamp = timestamp,
     }
-    session.history[#session.history + 1] = entry
-    table.sort(session.history, function(left, right)
-        local leftTimestamp = type(left) == "table" and left.timestamp or 0
-        local rightTimestamp = type(right) == "table" and right.timestamp or 0
-        if leftTimestamp == rightTimestamp then
-            local leftId = type(left) == "table" and left.id or tostring(left)
-            local rightId = type(right) == "table" and right.id or tostring(right)
-            return leftId < rightId
-        end
-        return leftTimestamp < rightTimestamp
-    end)
-    while #session.history > MAX_CHAT_HISTORY do
-        table.remove(session.history, 1)
-    end
+    local insertAt = insertHistoryEntry(session, entry)
 
-    if activeGroups[session.id] == session and saveGroup then
-        saveGroup(session)
+    if activeGroups[session.id] == session then
+        queueGroupSave(session)
     end
-    if session.window then
-        rebuildGroupLog(session)
+    if session.window and insertAt then
+        if insertAt == #session.history then
+            local line = renderGroupMessage(session, entry)
+            session.window.log:AddMessage(TrialChatCommon.RemovePlayerLinks(line))
+            session.window.log:ScrollToBottom()
+        else
+            rebuildGroupLog(session)
+        end
         session.window.lastMessageAt = GetTime()
         updateWindowAlpha(session.window)
         C_Timer.After(10, function()
             updateWindowAlpha(session.window)
         end)
     end
-    return true, entry
+    return insertAt ~= nil, entry
 end
 
 local function sendHistoryEntry(session, target, entry, initialDelay)
@@ -371,16 +404,8 @@ local function receiveHistoryChunk(session, sender, body)
     timestamp = tonumber(timestamp)
     if entryId ~= messageId or not timestamp then return end
 
-    local added, entry = addGroupMessage(session, entrySender, message,
+    addGroupMessage(session, entrySender, message,
         emoteFlag == "E", entryId, timestamp, true)
-    if added and activeGroups[session.id] == session then
-        for _, member in pairs(session.members) do
-            if not namesMatch(member.name, selfName or UnitName("player"))
-                and not namesMatch(member.name, sender) then
-                sendHistoryEntry(session, member.name, entry)
-            end
-        end
-    end
 end
 
 local function createGroupWindow(session)
@@ -719,7 +744,10 @@ local function createGroupWindow(session)
     window:UpdateMembers()
 end
 
-saveGroup = function(session)
+persistGroup = function(session)
+    if not session then return end
+    pendingGroupSaves[session.id] = nil
+    -- Passwords are a shared room key stored in SavedVariables and sent in HELLO whispers.
     local savedGroups = getSavedGroups()
     for _, member in pairs(session.members or {}) do
         if not isSelf(member.name) then
@@ -800,7 +828,7 @@ local function activateGroup(session)
     activeGroups[session.id] = session
     session.members = session.members or {}
     addMember(session, selfName or UnitName("player"))
-    saveGroup(session)
+    persistGroup(session)
     createGroupWindow(session)
     if not session.autoJoin then
         session.window.frame:Show()
@@ -1024,6 +1052,15 @@ openGroupDialog = function(mode, preset)
         dialog.passwordInput:SetAutoFocus(false)
         dialog.passwordInput:SetMaxLetters(MAX_PASSWORD_BYTES)
         dialog.passwordInput:SetPassword(true)
+        dialog.passwordInput:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Shared room key, stored on this character.")
+            GameTooltip:AddLine(
+                "It is sent in addon whispers when someone joins. Do not reuse a real password.",
+                1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        dialog.passwordInput:SetScript("OnLeave", GameTooltip_Hide)
 
         dialog.memberLabel = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         dialog.memberLabel:SetPoint("TOPLEFT", dialog.passwordInput, "BOTTOMLEFT", -4, -10)
@@ -1089,7 +1126,9 @@ local function disconnectSession(id)
     local session = activeGroups[id]
     if not session then return nil end
 
+    persistGroup(session)
     sendToMembers(session, "BYE")
+    pendingGroupSaves[id] = nil
     activeGroups[id] = nil
     session.members = {}
     if session.window then
@@ -1116,6 +1155,7 @@ local function exitGroup(id)
 
     local session = disconnectSession(id)
     pendingJoins[id] = nil
+    pendingGroupSaves[id] = nil
     getSavedGroups()[id] = nil
     showNotice("Exited " .. (session and session.name or savedGroup.name)
         .. " and removed it from your saved groups.")
@@ -1132,6 +1172,7 @@ local function deleteGroup(id)
 
     if session then
         sendToMembers(session, "DELETE")
+        pendingGroupSaves[id] = nil
         activeGroups[id] = nil
         session.members = {}
         if session.window then
@@ -1140,6 +1181,7 @@ local function deleteGroup(id)
             session.window:UpdateMembers()
         end
     end
+    pendingGroupSaves[id] = nil
     getSavedGroups()[id] = nil
     showNotice("Deleted " .. (session and session.name or savedGroup.name) .. ".")
 end
@@ -1186,7 +1228,7 @@ local function createMenuRow(index)
         local muted = not wasMuted
         if active then
             active.muted = muted
-            saveGroup(active)
+            persistGroup(active)
         elseif savedGroup then
             savedGroup.muted = muted
         end
@@ -1439,11 +1481,13 @@ end
 
 eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution, sender)
     if event == "PLAYER_LOGIN" then
+        refreshIdentity()
         autoJoinSavedGroups()
         return
     end
 
     if event == "PLAYER_LOGOUT" then
+        flushGroupSaves()
         for _, session in pairs(activeGroups) do
             sendToMembers(session, "BYE")
         end
@@ -1558,6 +1602,7 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
             end
             activeGroups[id] = nil
             pendingJoins[id] = nil
+            pendingGroupSaves[id] = nil
             getSavedGroups()[id] = nil
             showNotice("The creator deleted " .. (session and session.name
                 or (savedGroup and savedGroup.name) or id) .. ".")
@@ -1596,8 +1641,13 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
 end)
 
 if IsLoggedIn() then
-    C_Timer.After(1, autoJoinSavedGroups)
+    C_Timer.After(1, function()
+        refreshIdentity()
+        autoJoinSavedGroups()
+    end)
 end
+
+C_Timer.NewTicker(GROUP_SAVE_INTERVAL, flushGroupSaves)
 
 C_Timer.NewTicker(MEMBER_UPDATE_INTERVAL, function()
     local now = GetTime()

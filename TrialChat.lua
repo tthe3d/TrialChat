@@ -22,11 +22,13 @@ local pendingPings = {}
 local pendingIncomingMessages = {}
 local recentIncomingMessages = {}
 local INCOMING_MESSAGE_DEDUP_SECONDS = 1
-local playerName = UnitName("player")
-local fullPlayerName, playerRealm = UnitFullName("player")
-local normalizedPlayerRealm = GetNormalizedRealmName and GetNormalizedRealmName()
-local _, playerClass = UnitClass("player")
+local playerName = TrialChatCommon.GetPlayerName()
+local fullPlayerName = TrialChatCommon.GetPlayerFullName()
+local playerRealm = TrialChatCommon.GetPlayerRealm()
+local playerClass = TrialChatCommon.GetPlayerClass()
 local classByName = {}
+local recipientListGeneration = 0
+local lastRenderedRecipientGeneration
 local minimapButton
 local chatWindow
 local chatLog
@@ -51,9 +53,6 @@ local RECIPIENT_ROW_HEIGHT = 18
 local CHAT_WINDOW_IDLE_ALPHA = 0.45
 local CHAT_MESSAGE_VISIBLE_SECONDS = 10
 local lastChatMessageAt
-if fullPlayerName and playerRealm and playerRealm ~= "" then
-    fullPlayerName = fullPlayerName .. "-" .. playerRealm
-end
 
 local function updateChatWindowAlpha()
     if not chatWindow then return end
@@ -92,9 +91,14 @@ end
 local function saveChatHistoryLine(line)
     local history = getChatHistory()
     history[#history + 1] = line
-    while #history > MAX_CHAT_HISTORY do
-        table.remove(history, 1)
+    local overflow = #history - MAX_CHAT_HISTORY
+    if overflow <= 0 then return end
+
+    local compacted = {}
+    for index = overflow + 1, #history do
+        compacted[#compacted + 1] = history[index]
     end
+    TrialChatDB.chatHistory = compacted
 end
 
 local function saveChatWindowSettings()
@@ -113,17 +117,20 @@ local function saveChatWindowSettings()
     }
 end
 
-local function normalizeName(name)
-    return name and strlower(name) or nil
+local normalizeName = TrialChatCommon.NormalizeName
+local normalizeCharacterName = TrialChatCommon.NormalizeCharacterName
+
+local function markRecipientListDirty()
+    recipientListGeneration = recipientListGeneration + 1
 end
 
-local function normalizeCharacterName(name)
-    local normalized = normalizeName(name)
-    if normalized and not string.find(name, "-", 1, true)
-        and playerRealm and playerRealm ~= "" then
-        return normalized .. "-" .. normalizeName(playerRealm)
+local function noteActiveListener(name)
+    if not name then return end
+    local isNew = activeListeners[name] == nil
+    activeListeners[name] = GetTime()
+    if isNew then
+        markRecipientListDirty()
     end
-    return normalized
 end
 
 local function getPermanentListeners()
@@ -179,18 +186,7 @@ local function rememberUnitClass(unit, fullName)
     rememberClass(fullName, classFile)
 end
 
-local function getClassColor(classFile)
-    local classColor = classFile and RAID_CLASS_COLORS[classFile]
-    if not classColor then return nil end
-    if classColor.colorStr then
-        return "|c" .. classColor.colorStr
-    end
-
-    return string.format("|cff%02x%02x%02x",
-        math.floor(classColor.r * 255),
-        math.floor(classColor.g * 255),
-        math.floor(classColor.b * 255))
-end
+local getClassColor = TrialChatCommon.GetClassColor
 
 local function getKnownNameColor(name, fallback)
     local classFile = classByName[normalizeName(name)]
@@ -201,23 +197,7 @@ local function getKnownNameColor(name, fallback)
     return getClassColor(classFile) or fallback
 end
 
-local function isSelf(sender)
-    local senderKey = normalizeName(sender)
-    if senderKey == normalizeName(fullPlayerName) then return true end
-    local senderName, senderRealm = string.match(sender, "^([^-]+)%-(.+)$")
-    if not senderName then
-        return normalizeName(sender) == normalizeName(playerName)
-    end
-    if normalizeName(senderName) ~= normalizeName(playerName) then return false end
-
-    local currentRealm = normalizedPlayerRealm or playerRealm
-    if not currentRealm or currentRealm == "" then return false end
-
-    local function normalizeRealm(realm)
-        return normalizeName(string.gsub(realm, "[%s']", ""))
-    end
-    return normalizeRealm(senderRealm) == normalizeRealm(currentRealm)
-end
+local isSelf = TrialChatCommon.IsSelf
 
 local function getGroupMembers()
     local members = {}
@@ -328,7 +308,8 @@ local function createRecipientRow(index)
         else
             permanentListeners[normalizeName(self.recipientName)] = self.recipientName
         end
-        updateRecipientList()
+        markRecipientListDirty()
+        updateRecipientList(true)
     end)
     row:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
@@ -347,8 +328,12 @@ local function createRecipientRow(index)
     recipientRows[index] = row
 end
 
-updateRecipientList = function()
+updateRecipientList = function(force)
     if not recipientScrollFrame or not recipientTitle then return end
+    if not force and lastRenderedRecipientGeneration == recipientListGeneration then
+        return
+    end
+    lastRenderedRecipientGeneration = recipientListGeneration
 
     recipientList = getTrialChatRecipients()
     while #recipientRows < #recipientList do
@@ -589,7 +574,7 @@ local function createChatWindow()
         else
             recipientPanel:Hide()
         end
-        updateRecipientList()
+        updateRecipientList(true)
         if GameTooltip:GetOwner() == recipientToggleButton then
             GameTooltip:SetText(listenersExpanded and "Hide listeners" or "Show listeners")
         end
@@ -608,7 +593,9 @@ local function createChatWindow()
     recipientScrollFrame:SetPoint("BOTTOMRIGHT", recipientPanel, "BOTTOMRIGHT", -24, 6)
     recipientScrollFrame:SetScript("OnVerticalScroll", function(self, offset)
         FauxScrollFrame_OnVerticalScroll(
-            self, offset, RECIPIENT_ROW_HEIGHT, updateRecipientList)
+            self, offset, RECIPIENT_ROW_HEIGHT, function()
+                updateRecipientList(true)
+            end)
     end)
     recipientScrollFrame:SetScript("OnMouseWheel", function(self, delta)
         local scrollBar = self.ScrollBar
@@ -647,7 +634,8 @@ local function createChatWindow()
 
         permanentListeners[key] = name
         self:SetText("")
-        updateRecipientList()
+        markRecipientListDirty()
+        updateRecipientList(true)
     end)
     addListenerInput:SetScript("OnEscapePressed", function(self)
         self:ClearFocus()
@@ -666,7 +654,7 @@ local function createChatWindow()
     recipientScrollFrame:SetPoint("BOTTOMRIGHT", recipientPanel, "BOTTOMRIGHT", -24, 38)
 
     recipientPanel:SetScript("OnSizeChanged", function()
-        updateRecipientList()
+        updateRecipientList(true)
     end)
     recipientPanel:Hide()
 
@@ -754,12 +742,12 @@ local function createChatWindow()
 
     updateChatContentLayout()
     chatWindow:Hide()
-    updateRecipientList()
+    updateRecipientList(true)
 end
 
 openChatWindow = function(focusInput)
     createChatWindow()
-    updateRecipientList()
+    updateRecipientList(true)
     chatWindow:Show()
     if focusInput then
         chatInput:SetFocus()
@@ -855,11 +843,23 @@ local function createMinimapButton()
         end
     end)
     minimapButton:SetScript("OnLeave", GameTooltip_Hide)
+    local function updateMinimapDragPosition(self)
+        local centerX, centerY = Minimap:GetCenter()
+        local cursorX, cursorY = GetCursorPosition()
+        local scale = UIParent:GetEffectiveScale()
+        cursorX, cursorY = cursorX / scale, cursorY / scale
+        local angle = math.atan2(cursorY - centerY, cursorX - centerX)
+        local radius = (Minimap:GetWidth() / 2) + 8
+        self:ClearAllPoints()
+        self:SetPoint("CENTER", Minimap, "CENTER",
+            math.cos(angle) * radius, math.sin(angle) * radius)
+    end
+
     minimapButton:SetScript("OnDragStart", function(self)
-        self.isDragging = true
+        self:SetScript("OnUpdate", updateMinimapDragPosition)
     end)
     minimapButton:SetScript("OnDragStop", function(self)
-        self.isDragging = false
+        self:SetScript("OnUpdate", nil)
 
         local centerX, centerY = Minimap:GetCenter()
         local buttonX, buttonY = self:GetCenter()
@@ -869,19 +869,6 @@ local function createMinimapButton()
 
     minimapButton:SetMovable(true)
     minimapButton:SetClampedToScreen(true)
-    minimapButton:SetScript("OnUpdate", function(self)
-        if self.isDragging then
-            local centerX, centerY = Minimap:GetCenter()
-            local cursorX, cursorY = GetCursorPosition()
-            local scale = UIParent:GetEffectiveScale()
-            cursorX, cursorY = cursorX / scale, cursorY / scale
-            local angle = math.atan2(cursorY - centerY, cursorX - centerX)
-            local radius = (Minimap:GetWidth() / 2) + 8
-            self:ClearAllPoints()
-            self:SetPoint("CENTER", Minimap, "CENTER",
-                math.cos(angle) * radius, math.sin(angle) * radius)
-        end
-    end)
     updateMinimapButtonPosition()
 end
 
@@ -894,13 +881,13 @@ frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
     local now = GetTime()
     if string.sub(message, 1, #CLASS_TAG) == CLASS_TAG then
         rememberClass(sender, string.sub(message, #CLASS_TAG + 1))
-        updateRecipientList()
+        updateRecipientList(true)
         return
     end
 
     if message == PING and channel == "WHISPER" then
         C_ChatInfo.SendAddonMessage(PREFIX, PONG, "WHISPER", sender)
-        activeListeners[sender] = now
+        noteActiveListener(sender)
         updateRecipientList()
         return
     end
@@ -908,7 +895,7 @@ frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
     if message == PONG and channel == "WHISPER" then
         local pingTime = pendingPings[normalizeName(sender)]
         if pingTime and now - pingTime <= LISTENER_TIMEOUT then
-            activeListeners[sender] = now
+            noteActiveListener(sender)
         end
         pendingPings[normalizeName(sender)] = nil
         updateRecipientList()
@@ -923,7 +910,7 @@ frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
         string.sub(message, #messageTag + 1))
     chatText = TrialChatCommon.NormalizeMessageMarkup(chatText)
     local shortSender = string.match(sender, "^([^-]+)") or sender
-    activeListeners[sender] = now
+    noteActiveListener(sender)
     updateRecipientList()
 
     if isEmote then
@@ -954,10 +941,12 @@ end)
 
 C_Timer.NewTicker(2, function()
     local now = GetTime()
+    local listenersChanged = false
 
     for name, lastSeen in pairs(activeListeners) do
         if now - lastSeen > LISTENER_TIMEOUT then
             activeListeners[name] = nil
+            listenersChanged = true
         end
     end
 
@@ -995,7 +984,10 @@ C_Timer.NewTicker(2, function()
             end
         end
     end
-    updateRecipientList()
+    if listenersChanged then
+        markRecipientListDirty()
+        updateRecipientList()
+    end
 end)
 
 sendTrialChatMessage = function(msg)
@@ -1037,7 +1029,6 @@ sendTrialChatMessage = function(msg)
     local sentToGroup = IsInGroup()
     local inRaid = IsInRaid()
     local sentWhisperCount = 0
-    local sentNearbyWhisperCount = 0
     local groupMembers = getGroupMembers()
 
     if sentToGroup and not inRaid then
@@ -1080,13 +1071,15 @@ sendTrialChatMessage = function(msg)
         local isGroupMember = groupMembers[normalizeCharacterName(targetPlayer)] ~= nil
         if not isGroupMember or inRaid then
             if classPayload and not (inRaid and isGroupMember) then
-                C_ChatInfo.SendAddonMessage(PREFIX, classPayload, "WHISPER", targetPlayer)
+                local targetKey = normalizeName(targetPlayer)
+                local shortName = string.match(targetPlayer, "^([^-]+)")
+                if not classByName[targetKey]
+                    and not (shortName and classByName[normalizeName(shortName)]) then
+                    C_ChatInfo.SendAddonMessage(PREFIX, classPayload, "WHISPER", targetPlayer)
+                end
             end
             C_ChatInfo.SendAddonMessage(PREFIX, payload, "WHISPER", targetPlayer)
             sentWhisperCount = sentWhisperCount + 1
-            if not isGroupMember then
-                sentNearbyWhisperCount = sentNearbyWhisperCount + 1
-            end
         end
     end
 
@@ -1094,18 +1087,11 @@ sendTrialChatMessage = function(msg)
     local myNameColor = getClassColor(playerClass)
     local messageColor = isEmote and "|cffff7d0a"
         or sentToGroup and "|cffff7d0a" or "|cffffcc00"
-    if sentToGroup and sentNearbyWhisperCount > 0 then
-        printMessage(myShortName, msg, messageColor, myNameColor, isEmote)
-    elseif sentToGroup then
-        printMessage(myShortName, msg, messageColor, myNameColor, isEmote)
-    elseif sentWhisperCount > 0 then
-        printMessage(myShortName, msg, messageColor, myNameColor, isEmote)
-    else
-        printMessage(myShortName, msg, messageColor, myNameColor, isEmote)
+    printMessage(myShortName, msg, messageColor, myNameColor, isEmote)
+    if not sentToGroup and sentWhisperCount == 0 then
         showTrialChatNotice(
             "|cffff7d0aBut nobody heard that, because there are no players using TrialChat around.|r")
     end
-    updateRecipientList()
 end
 
 SLASH_TRIALCHAT1 = "/tc"
@@ -1137,6 +1123,11 @@ hookFrame:SetScript("OnEvent", function(_, event)
         return
     end
 
+    TrialChatCommon.RefreshPlayerIdentity()
+    playerName = TrialChatCommon.GetPlayerName()
+    fullPlayerName = TrialChatCommon.GetPlayerFullName()
+    playerRealm = TrialChatCommon.GetPlayerRealm()
+    playerClass = TrialChatCommon.GetPlayerClass()
     createChatWindow()
     createMinimapButton()
     hookSlashOpenShortcut()
