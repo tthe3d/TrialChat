@@ -8,5 +8,6 @@
 
 TrialChatCommon.lua
 TrialChatEmotes.lua
+TrialChatEmotesTargeted.lua
 TrialChat.lua
 TrialChatGroups.lua

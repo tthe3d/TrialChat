@@ -286,9 +286,23 @@ function TrialChatCommon.ParseEmote(message)
         return message, false
     end
 
+    local target = argument
+    if target == "" and UnitExists("target") then
+        target = UnitName("target") or ""
+    end
+
+    if target ~= "" then
+        local targetedDescription =
+            TrialChatCommon.TargetedEmoteDescriptions[command]
+        if targetedDescription then
+            description = string.gsub(targetedDescription,
+                "%[playername%]", function() return target end)
+        end
+    end
+
     local token = _G.hash_EmoteTokenList
         and _G.hash_EmoteTokenList["/" .. string.upper(command)]
-    return description, true, token, argument ~= "" and argument or nil
+    return description, true, token, target ~= "" and target or nil
 end
 
 function TrialChatCommon.PerformEmote(token, target)
