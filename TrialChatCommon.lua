@@ -691,6 +691,60 @@ function TrialChatCommon.FormatMessageText(text)
     return table.concat(result)
 end
 
+-- "/say" refuses a message that holds a "|" which doesn't begin a valid escape
+-- sequence, so a raw shortcut like ":-)" or "8-|" can't be echoed as it is.
+-- Double every such "|"; the game reads "||" back as a single "|". Real
+-- colours, hyperlinks and emoticon textures are passed through untouched.
+function TrialChatCommon.EscapeChatPipes(text)
+    if not text or not string.find(text, "|", 1, true) then return text end
+
+    local result = {}
+    local position = 1
+    while position <= #text do
+        local char = string.sub(text, position, position)
+        if char ~= "|" then
+            result[#result + 1] = char
+            position = position + 1
+        else
+            local nextChar = string.sub(text, position + 1, position + 1)
+            local color = string.match(
+                string.sub(text, position + 2, position + 9),
+                "^%x%x%x%x%x%x%x%x$")
+            if nextChar == "c" and color then
+                result[#result + 1] = string.sub(text, position, position + 9)
+                position = position + 10
+            elseif nextChar == "H" then
+                local linkEnd = findHyperlinkEnd(text, position)
+                if linkEnd then
+                    result[#result + 1] = string.sub(text, position, linkEnd)
+                    position = linkEnd + 1
+                else
+                    result[#result + 1] = "||"
+                    position = position + 1
+                end
+            elseif nextChar == "T" then
+                local textureEnd = string.find(text, "|t", position + 2, true)
+                if textureEnd then
+                    result[#result + 1] =
+                        string.sub(text, position, textureEnd + 1)
+                    position = textureEnd + 2
+                else
+                    result[#result + 1] = "||"
+                    position = position + 1
+                end
+            elseif nextChar == "r" or nextChar == "n" then
+                result[#result + 1] = string.sub(text, position, position + 1)
+                position = position + 2
+            else
+                result[#result + 1] = "||"
+                position = position + 1
+            end
+        end
+    end
+
+    return table.concat(result)
+end
+
 local copyDialog
 
 -- WoW addons can't write to the clipboard, so copying shows the text in a

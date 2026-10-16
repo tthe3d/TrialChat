@@ -671,7 +671,10 @@ sendTrialChatMessage = function(msg, reply)
     TrialChatDB = TrialChatDB or {}
     if not isEmote then
         if TrialChatDB.echoToSay then
-            SendChatMessage(msg, "SAY")
+            -- The message still holds the raw shortcut (":-)" and the like)
+            -- and "/say" rejects a "|" that doesn't start a valid escape, so
+            -- escape bare pipes before handing it to the game.
+            SendChatMessage(TrialChatCommon.EscapeChatPipes(msg), "SAY")
         else
             TrialChatBubbles.ShowOwnMessage(msg)
         end

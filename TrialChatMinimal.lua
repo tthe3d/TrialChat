@@ -471,6 +471,45 @@ end
 ---------------------------------------------------------------------------
 -- Messages
 ---------------------------------------------------------------------------
+-- An animated emoticon in a line is redrawn a cell at a time (see
+-- TrialChatEmoji.lua); the text around it never changes. Only lines on screen
+-- step, and only while their chip is shown, because a hidden frame gets no
+-- OnUpdate. The split into text and emoticons is cached on the line, since
+-- chips are recycled for whatever is scrolled into view. The message box is a
+-- plain edit box, so what you are typing never shows the picture, only the
+-- message once it is sent.
+local function redrawChipEmoji(chip)
+    chip.text:SetText(TrialChatCommon.BuildEmojiText(chip.emojiParts, GetTime()))
+end
+
+local function tickChipEmoji(chip, elapsed)
+    chip.emojiElapsed = (chip.emojiElapsed or 0) + elapsed
+    local step = 1 / (TrialChatCommon.EmojiFPS or 5)
+    if chip.emojiElapsed < step then return end
+    chip.emojiElapsed = 0
+    redrawChipEmoji(chip)
+end
+
+-- Sets a chip's text and starts animating it when its line holds an animated
+-- emoticon, stopping the tick on lines that don't.
+local function setChipText(chip, line)
+    chip.text:SetText(line.text)
+    if not line.emojiChecked then
+        line.emojiParts, line.emojiAnimated =
+            TrialChatCommon.SplitEmojiMarkup(line.text)
+        line.emojiChecked = true
+    end
+    if line.emojiAnimated then
+        chip.emojiParts = line.emojiParts
+        chip.emojiElapsed = 0
+        chip:SetScript("OnUpdate", tickChipEmoji)
+    elseif chip.emojiParts then
+        chip:SetScript("OnUpdate", nil)
+        chip.emojiParts = nil
+        chip.emojiElapsed = nil
+    end
+end
+
 function View:MakeLine(entry, format, colorFor)
     if type(entry) == "string" then
         return { entry = entry, text = TrialChatCommon.RemovePlayerLinks(entry), color = Color.text }
@@ -544,7 +583,7 @@ function View:LayoutLines()
     for rank = 1, count - self.scroll do
         local line = self.lines[count - self.scroll - rank + 1]
         local chip = self.chips[rank] or self:CreateChip()
-        chip.text:SetText(line.text)
+        setChipText(chip, line)
         UI.SetTextColor(chip.text, line.color)
         local width = math.min(math.ceil(chip.text:GetUnboundedStringWidth()) + 1, textWidth)
         chip.text:SetWidth(width)
