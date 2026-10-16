@@ -437,7 +437,19 @@ end
 -- The smiley button opens the emoji grid; picking one drops its shortcut into
 -- the message box. The emote lists open beside the grid and "make your own"
 -- sits under it.
+-- The picker's catcher sits beneath the window rather than over it, so the
+-- window stays fully interactive while the picker is up: its buttons still
+-- hover and click, and it can be dragged or resized, all without the picker
+-- closing.
 local function showEmoteMenu()
+    -- Clicking the smiley again while the grid is up closes it, the way a
+    -- toggle should, and hands writing straight back to the message box.
+    if TrialChatEmojiPicker.IsShown() then
+        TrialChatEmojiPicker.Hide()
+        if composer.input then composer.input:SetFocus() end
+        updateAlpha()
+        return
+    end
     -- Put the cursor in the message box as the picker opens, so the window
     -- stays lit (it fades while nothing is focused) and typing can start right
     -- away. Clicking an emoji drops it in at the cursor.
@@ -447,7 +459,11 @@ local function showEmoteMenu()
     end
     TrialChatEmojiPicker.Show({
         input = composer.input,
-        onClose = updateAlpha,
+        anchor = composer.emoteButton,
+        window = window,
+        onClose = function()
+            updateAlpha()
+        end,
         onPick = function(entry)
             local input = composer.input
             if not input then return end
@@ -1185,12 +1201,6 @@ local function createHeader()
 end
 
 local function createComposer()
-    local emoteButton = UI.CreateButton(main, {
-        icon = "smile", iconSize = 18, width = 36, height = 36, tooltip = "Emotes",
-        onClick = function() showEmoteMenu() end,
-    })
-    emoteButton:SetPoint("BOTTOMLEFT", main, "BOTTOMLEFT", 20, 14)
-
     local sendButton = UI.CreateButton(main, {
         style = "accent", icon = "send", iconSize = 16, width = 36, height = 36,
         tooltip = "Send",
@@ -1201,10 +1211,20 @@ local function createComposer()
     composer.counter = UI.CreateText(main, UI.Font.small, Color.muted)
     composer.counter:SetPoint("RIGHT", sendButton, "LEFT", -10, 0)
 
+    -- The smiley sits at the right end of the message box rather than the left,
+    -- so the emoji window it opens pops out to the right of the chat and leaves
+    -- the incoming messages on the left readable while it is up.
+    local emoteButton = UI.CreateButton(main, {
+        icon = "smile", iconSize = 18, width = 36, height = 36, tooltip = "Emotes",
+        onClick = function() showEmoteMenu() end,
+    })
+    emoteButton:SetPoint("RIGHT", composer.counter, "LEFT", -10, 0)
+    composer.emoteButton = emoteButton
+
     local input = UI.CreateField(main, { height = 36 })
     composer.input = input
-    input:SetPoint("LEFT", emoteButton, "RIGHT", 8, 0)
-    input:SetPoint("RIGHT", composer.counter, "LEFT", -10, 0)
+    input:SetPoint("BOTTOMLEFT", main, "BOTTOMLEFT", 20, 14)
+    input:SetPoint("BOTTOMRIGHT", emoteButton, "BOTTOMLEFT", -8, 0)
     TrialChatCommon.RegisterLinkInput(input)
     input:SetScript("OnEnterPressed", sendComposerMessage)
     -- Escape with the emoji picker up closes just the picker and keeps the
@@ -1223,12 +1243,15 @@ local function createComposer()
     input:HookScript("OnEditFocusLost", function()
         updateAlpha()
         -- Clicking the emoji picker's own empty space shouldn't stop writing:
-        -- while the picker is up and its search box isn't the one taking focus,
-        -- hand the keyboard straight back to the message box.
+        -- while the picker is up, hand the keyboard straight back to the
+        -- message box -- unless another box (the window's search, say) has
+        -- deliberately taken it.
         C_Timer.After(0, function()
             if TrialChatEmojiPicker.IsShown()
                 and not TrialChatEmojiPicker.IsSearchFocused()
-                and not input:HasFocus() then
+                and not input:HasFocus()
+                and not (GetCurrentKeyBoardFocus
+                    and GetCurrentKeyBoardFocus()) then
                 input:SetFocus()
             end
         end)
@@ -1384,7 +1407,9 @@ local function createWindow()
     end
     window:EnableMouse(true)
     window:RegisterForDrag("LeftButton")
-    window:SetScript("OnDragStart", window.StartMoving)
+    window:SetScript("OnDragStart", function(self)
+        self:StartMoving()
+    end)
     window:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         saveWindowSettings()
@@ -1425,6 +1450,14 @@ local function createWindow()
     resizeGrip:SetScript("OnMouseUp", function()
         window:StopMovingOrSizing()
         saveWindowSettings()
+    end)
+
+    -- Resizing the window while the emoji picker is up keeps the picker's
+    -- proportions in step with it instead of leaving the panel at its old size.
+    window:HookScript("OnSizeChanged", function()
+        if TrialChatEmojiPicker.IsShown() then
+            TrialChatEmojiPicker.RefreshScale()
+        end
     end)
 
     window:HookScript("OnEnter", updateAlpha)

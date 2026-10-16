@@ -24,7 +24,47 @@ local PANEL_WIDTH = 190
 local PANEL_HEADER_HEIGHT = 34
 local PANEL_ROW_HEIGHT = 26
 
+-- The little tail that connects the picker to the smiley button, drawn under
+-- its bottom-left corner while it is popped out of the button. The outline is a
+-- curved shape and the fill is that same shape inset by its 1 px line, so the
+-- two read as one smooth continuation of the panel's own rounded outline.
+local TAIL_TEXTURE = "Interface\\AddOns\\TrialChat\\Media\\bubble-tail.tga"
+local TAIL_FILL_TEXTURE =
+    "Interface\\AddOns\\TrialChat\\Media\\bubble-tail-fill.tga"
+local TAIL_WIDTH = 24
+local TAIL_HEIGHT = 8
+-- Where the panel sits relative to the button: down one pixel of the tail's
+-- outline, plus room for the rest of the tail to hang clear of the button
+-- rather than land on top of it.
+local ANCHOR_X = -12
+local ANCHOR_Y = 12
+local TAIL_INSET = 2
+local POP_TIME = 0.16
+
+-- The window the picker pops out of: the panel keeps the window's proportions
+-- so it shrinks and grows along with it instead of staying one fixed size.
+-- REFERENCE_HEIGHT is the window's default height (TrialChatWindow's
+-- DEFAULT_HEIGHT), the size the grid was laid out for. BASE_SCALE is how big
+-- the panel sits there (1 being the grid's full natural size) and SIZE_SLOPE is
+-- how much of the window's change it follows, kept below 1 so the panel stays a
+-- little smaller than the chat rather than tracking it inch for inch.
+local REFERENCE_HEIGHT = 540
+local BASE_SCALE = 0.8
+local SIZE_SLOPE = 0.75
+local MIN_SCALE, MAX_SCALE = 0.62, 1.15
+
 local picker
+
+-- The scale the panel sits at for a given window: it follows the window's
+-- height so it shrinks and grows with the chat, but from BASE_SCALE and at a
+-- gentler SIZE_SLOPE, so it never crowds the chat. The clamps stop it from
+-- vanishing or towering off the screen.
+local function computeScale(source)
+    local height = source and source:GetHeight()
+    if not height or height <= 0 then return 1 end
+    local scaled = BASE_SCALE * (1 + (height / REFERENCE_HEIGHT - 1) * SIZE_SLOPE)
+    return math.max(MIN_SCALE, math.min(MAX_SCALE, scaled))
+end
 
 -- Whether the cursor is over a frame, no matter what lies on top of it. The
 -- catcher covers the whole screen while the picker is up, so a hit test that
@@ -175,6 +215,11 @@ local function createEmotePanel(frame)
     -- Swallow clicks on the panel's padding, so only a click outside both the
     -- picker and the list closes them.
     panel:EnableMouse(true)
+    -- Clicking the list's own padding keeps the keyboard in the message box,
+    -- the same as clicking the picker's empty space does.
+    panel:SetScript("OnMouseDown", function()
+        if frame.input then frame.input:SetFocus() end
+    end)
     panel.box = UI.CreateBox(panel, { radius = 10, border = true })
     panel.box:SetColor(Color.window)
     panel.box:SetBorderColor(Color.outline)
@@ -296,6 +341,76 @@ local function createFooterButton(frame, text, onClick)
     return button
 end
 
+-- A one-shot tween driver. Only one animation runs on the picker at a time.
+local function runTween(frame, elapsed)
+    local tween = frame.tween
+    if not tween then
+        frame:SetScript("OnUpdate", nil)
+        return
+    end
+    tween.elapsed = tween.elapsed + elapsed
+    local progress = math.min(tween.elapsed / tween.time, 1)
+    tween.step(frame, progress)
+    if progress >= 1 then
+        frame.tween = nil
+        frame:SetScript("OnUpdate", nil)
+        if tween.done then tween.done(frame) end
+    end
+end
+
+local function playTween(frame, time, step, done)
+    frame.tween = { elapsed = 0, time = time, step = step, done = done }
+    frame:SetScript("OnUpdate", runTween)
+end
+
+local function easeOut(progress)
+    return 1 - (1 - progress) * (1 - progress)
+end
+
+-- The tail is two stacked shapes: a curved outline in the border colour and a
+-- curved fill in the window colour above it, so it reads as an outlined
+-- continuation of the panel and doesn't land on top of the button.
+local function setTailShown(frame, shown)
+    frame.tailBorder:SetShown(shown)
+    frame.tailFill:SetShown(shown)
+    frame.tailHit:SetShown(shown)
+end
+
+local function resetTail(frame)
+    frame.tailBorder:SetAlpha(1)
+    frame.tailFill:SetAlpha(1)
+end
+
+-- Puts the tail's tip under the middle of the button the picker popped from.
+-- Its top sits a couple of pixels inside the panel so the fill covers the
+-- panel's own border where it joins. The panel is scaled with the window, so
+-- the offset is divided by that scale to keep the tip lined up with the button.
+local function placeTail(frame, anchor)
+    local buttonWidth = (anchor and anchor:GetWidth()) or 36
+    local scale = frame.baseScale or 1
+    local offset = buttonWidth / 2 / scale - ANCHOR_X
+    for _, tail in ipairs({ frame.tailBorder, frame.tailFill, frame.tailHit }) do
+        tail:ClearAllPoints()
+        tail:SetPoint("TOP", frame, "BOTTOMLEFT", offset, TAIL_INSET)
+    end
+end
+
+-- Pops the window out of the button: it grows from the button's corner with the
+-- tail attached, up to the size the window dictates.
+local function popBubble(frame)
+    frame.attached = true
+    resetTail(frame)
+    setTailShown(frame, true)
+    frame:SetAlpha(0)
+    frame:SetScale((frame.baseScale or 1) * 0.82)
+    playTween(frame, POP_TIME, function(f, progress)
+        local base = f.baseScale or 1
+        local eased = easeOut(progress)
+        f:SetAlpha(eased)
+        f:SetScale(base * (0.82 + 0.18 * eased))
+    end)
+end
+
 local function createPicker()
     local frame = CreateFrame("Frame", "TrialChatEmojiPickerFrame", UIParent)
     frame:SetFrameStrata("FULLSCREEN_DIALOG")
@@ -304,18 +419,35 @@ local function createPicker()
     frame:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
     frame:SetClampedToScreen(true)
     frame:EnableMouse(true)
-    frame:SetMovable(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", function(self)
-        self:StopMovingOrSizing()
-        -- Dragging drops the keyboard focus, so hand it back to the message
-        -- box: writing carries on while the picker is moved around.
-        if self.input then self.input:SetFocus() end
+    -- Typing carries on while the picker is up: clicking the picker's own empty
+    -- space (not one of its buttons or fields) hands the keyboard back to the
+    -- message box rather than leaving it nowhere.
+    frame:SetScript("OnMouseDown", function()
+        if frame.input then frame.input:SetFocus() end
     end)
     frame.box = UI.CreateBox(frame, { radius = 10, border = true })
     frame.box:SetColor(Color.window)
     frame.box:SetBorderColor(Color.outline)
+
+    -- The tail that connects the panel to the button it popped out of. The
+    -- border shape sits just behind the window-coloured one so the sides read as
+    -- an outline; the hit frame swallows clicks on the tail so they don't fall
+    -- through to the catcher and close the picker.
+    frame.tailBorder = frame:CreateTexture(nil, "ARTWORK", nil, 1)
+    frame.tailBorder:SetTexture(TAIL_TEXTURE)
+    frame.tailBorder:SetSize(TAIL_WIDTH, TAIL_HEIGHT)
+    UI.Tint(frame.tailBorder, Color.outline)
+    frame.tailFill = frame:CreateTexture(nil, "ARTWORK", nil, 2)
+    frame.tailFill:SetTexture(TAIL_FILL_TEXTURE)
+    frame.tailFill:SetSize(TAIL_WIDTH, TAIL_HEIGHT)
+    UI.Tint(frame.tailFill, Color.window)
+    frame.tailHit = CreateFrame("Frame", nil, frame)
+    frame.tailHit:SetSize(TAIL_WIDTH, TAIL_HEIGHT)
+    frame.tailHit:EnableMouse(true)
+    frame.tailHit:SetScript("OnMouseDown", function()
+        if frame.input then frame.input:SetFocus() end
+    end)
+    setTailShown(frame, false)
 
     frame.title = UI.CreateText(frame, UI.Font.item, Color.textSoft)
     frame.title:SetPoint("TOPLEFT", frame, "TOPLEFT", PADDING, -16)
@@ -348,11 +480,14 @@ local function createPicker()
         updateRows(true)
     end)
     -- Leaving the search for the picker's empty space shouldn't end writing
-    -- either: hand the keyboard back to the message box.
+    -- either: hand the keyboard back to the message box, unless another box has
+    -- deliberately taken it.
     frame.search:HookScript("OnEditFocusLost", function()
         C_Timer.After(0, function()
             if frame:IsShown() and frame.input
-                and not frame.search:HasFocus() and not frame.input:HasFocus() then
+                and not frame.search:HasFocus() and not frame.input:HasFocus()
+                and not (GetCurrentKeyBoardFocus
+                    and GetCurrentKeyBoardFocus()) then
                 frame.input:SetFocus()
             end
         end)
@@ -409,12 +544,16 @@ local function createPicker()
     end)
     writeOwn:SetPoint("LEFT", frame.soundButton, "RIGHT", 6, 0)
 
-    -- Any click outside the picker closes it.
+    -- Any click outside the window and the picker closes it. The catcher is
+    -- dropped just beneath the chat window (see Show) rather than over it: that
+    -- leaves the window's buttons hovering, clicking, dragging and resizing
+    -- normally without the picker closing, while the catcher still catches
+    -- every click that misses the window. (Propagation would have let clicks
+    -- through, but the window would not keep the drag.)
     local catcher = CreateFrame("Frame", nil, UIParent)
     catcher:SetAllPoints(UIParent)
     catcher:SetFrameStrata("FULLSCREEN_DIALOG")
     catcher:SetFrameLevel(4999)
-    catcher:EnableMouse(true)
     catcher:SetScript("OnMouseDown", function()
         frame:Hide()
         -- Clicking the message box closes the picker and starts typing there.
@@ -423,10 +562,18 @@ local function createPicker()
             input:SetFocus()
         end
     end)
+    catcher:EnableMouse(true)
     frame.catcher = catcher
     frame:SetScript("OnHide", function()
         catcher:Hide()
         GameTooltip_Hide()
+        -- Drop any half-played pop so the next open starts clean.
+        frame.tween = nil
+        frame:SetScript("OnUpdate", nil)
+        frame:SetScale(1)
+        frame:SetAlpha(1)
+        frame.attached = false
+        setTailShown(frame, false)
         if frame.onClose then frame.onClose() end
     end)
 
@@ -438,8 +585,9 @@ end
 -- Opens the picker. options.onPick(entry) is called with the chosen emoticon;
 -- options.onEmote(name, isSound) is called when an entry in the emote list is
 -- clicked; options.onWriteOwn() starts a custom emote. options.input is the
--- message box: clicking it closes the picker and focuses it. options.onClose()
--- runs when the picker closes, so the window can fade back.
+-- message box: clicking it closes the picker and focuses it. options.anchor is
+-- the smiley button the window pops out of. options.onClose() runs when the
+-- picker closes, so the window can fade back.
 function TrialChatEmojiPicker.Show(options)
     if not picker then picker = createPicker() end
     options = options or {}
@@ -448,16 +596,61 @@ function TrialChatEmojiPicker.Show(options)
     picker.onWriteOwn = options.onWriteOwn
     picker.onClose = options.onClose
     picker.input = options.input
+    picker.anchor = options.anchor
+    -- Match the window the picker pops out of: making the chat smaller shrinks
+    -- the panel with it, and making it larger grows the panel, rather than the
+    -- panel staying one fixed size whatever the window does. The window is kept
+    -- so a resize while the picker is open can update the scale on the spot.
+    picker.window = options.window
+    picker.baseScale = computeScale(options.window)
     picker.emotePanel:Hide()
     UI.SetButtonActive(picker.allButton, false)
     UI.SetButtonActive(picker.soundButton, false)
     picker.search:SetText("")
     picker.search:ClearFocus()
     updateRows(false)
+    -- Pop the window out of the smiley button, tail pointing back at it. If no
+    -- button was given, fall back to sitting in the middle of the screen.
+    picker:ClearAllPoints()
+    if picker.anchor then
+        picker:SetPoint("BOTTOMLEFT", picker.anchor, "TOPLEFT", ANCHOR_X, ANCHOR_Y)
+        placeTail(picker, picker.anchor)
+    else
+        picker:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
+    end
     picker:Show()
     picker:Raise()
     picker.catcher:Show()
+    -- Sit the catcher just under the chat window, so the window stays fully
+    -- interactive while the picker is up: its buttons still hover and click and
+    -- the window can be dragged or resized without the picker closing. The
+    -- picker itself is above both, and the catcher still catches every click
+    -- that misses the window.
+    if picker.window then
+        picker.catcher:SetFrameStrata(picker.window:GetFrameStrata())
+        picker.catcher:SetFrameLevel(
+            math.max(0, picker.window:GetFrameLevel() - 1))
+    end
+    popBubble(picker)
+    -- Auto-input: the message box takes the keyboard as the picker opens, so
+    -- typing can start straight away and carries on across a click on the
+    -- picker's empty space.
+    if picker.input then picker.input:SetFocus() end
     return picker
+end
+
+-- Keeps the panel in step with the window when it is resized while the picker
+-- is open, so resizing the chat neither closes the picker nor leaves the panel
+-- at its old size.
+function TrialChatEmojiPicker.RefreshScale()
+    if not picker or not picker:IsShown() then return end
+    picker.baseScale = computeScale(picker.window)
+    -- A pop or retract owns the scale while it runs; it reads baseScale on
+    -- every step, so it settles at the new size on its own.
+    if not picker.tween then
+        picker:SetScale(picker.baseScale)
+    end
+    if picker.attached then placeTail(picker, picker.anchor) end
 end
 
 function TrialChatEmojiPicker.IsShown()
