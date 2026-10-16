@@ -438,9 +438,9 @@ end
 -- the message box. The emote lists open beside the grid and "make your own"
 -- sits under it.
 -- The picker's catcher sits beneath the window rather than over it, so the
--- window stays fully interactive while the picker is up: its buttons still
--- hover and click, and it can be dragged or resized, all without the picker
--- closing.
+-- window stays interactive while the picker is up: it can be dragged or resized
+-- without the picker closing, and using any of its buttons or fields closes the
+-- picker (see watchOutsideClick in TrialChatEmojiPicker).
 local function showEmoteMenu()
     -- Clicking the smiley again while the grid is up closes it, the way a
     -- toggle should, and hands writing straight back to the message box.
@@ -467,13 +467,16 @@ local function showEmoteMenu()
         onPick = function(entry)
             local input = composer.input
             if not input then return end
-            -- Dropped at the cursor when typing, or at the end of whatever is
-            -- already there when the box isn't in focus.
-            if not input:HasFocus() then
+            -- The picker holds the keyboard on the message box, so the emoji
+            -- drops in at the caret. Only when the box isn't focused for some
+            -- reason does it go on the end, as before.
+            if input:HasFocus() then
+                input:Insert(entry.shortcut)
+            else
                 input:SetCursorPosition(#(input:GetText() or ""))
+                input:Insert(entry.shortcut)
+                input:SetFocus()
             end
-            input:Insert(entry.shortcut)
-            input:SetFocus()
         end,
         onEmote = function(name, isSound)
             sendToConversation((isSound and "//" or "/") .. name)
@@ -1241,6 +1244,9 @@ local function createComposer()
     input:HookScript("OnTextChanged", updateCounter)
     input:HookScript("OnEditFocusGained", updateAlpha)
     input:HookScript("OnEditFocusLost", function()
+        -- Remember where the caret was, so handing the keyboard back below
+        -- puts it back instead of dropping it at the end of the message.
+        local caret = input:GetCursorPosition()
         updateAlpha()
         -- Clicking the emoji picker's own empty space shouldn't stop writing:
         -- while the picker is up, hand the keyboard straight back to the
@@ -1253,6 +1259,7 @@ local function createComposer()
                 and not (GetCurrentKeyBoardFocus
                     and GetCurrentKeyBoardFocus()) then
                 input:SetFocus()
+                if caret then input:SetCursorPosition(caret) end
             end
         end)
     end)
@@ -1465,6 +1472,9 @@ local function createWindow()
     TrialChatCommon.WatchHover(window, updateAlpha)
     window:SetScript("OnShow", onViewShown)
     window:SetScript("OnHide", function()
+        -- The picker is anchored to a button in the window, so it can't outlive
+        -- it: closing or minimizing the chat puts the picker away too.
+        if TrialChatEmojiPicker.IsShown() then TrialChatEmojiPicker.Hide() end
         Groups:SetViewedGroup(nil)
         composer.input:ClearFocus()
         searchField:ClearFocus()

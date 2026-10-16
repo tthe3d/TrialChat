@@ -55,6 +55,20 @@ local MIN_SCALE, MAX_SCALE = 0.62, 1.15
 
 local picker
 
+-- Keeps the message box holding the keyboard while the picker is up. The game
+-- drops an edit box's focus when the mouse goes down on another frame, which
+-- would show the unfocused border and, worse, drop the caret at the end on the
+-- next emoji click. Taking the focus back on the way down, and putting the
+-- caret back where it was, keeps writing continuous. The search is left out of
+-- this: it wants the keyboard for itself.
+local function holdInputFocus()
+    local input = picker.input
+    if not input then return end
+    local caret = input:GetCursorPosition()
+    input:SetFocus()
+    if caret then input:SetCursorPosition(caret) end
+end
+
 -- The scale the panel sits at for a given window: it follows the window's
 -- height so it shrinks and grows with the chat, but from BASE_SCALE and at a
 -- gentler SIZE_SLOPE, so it never crowds the chat. The clamps stop it from
@@ -120,7 +134,7 @@ local function updateRows(resetScroll)
     end
 end
 
--- Every emote of one kind, sorted, ready for the panel's list. All emotes are
+-- Every emote of one kind, sorted, ready for the panel's list. Text emotes are
 -- the ones behind "/", sound emotes the ones behind "//".
 local function emoteElements(isSound)
     local source = (isSound and TrialChatCommon.SoundEmotes
@@ -157,6 +171,9 @@ local function initializeEmoteRow(row, element)
         row.label:SetJustifyH("LEFT")
         row.label:SetWordWrap(false)
         row:RegisterForClicks("LeftButtonUp")
+        -- Clicking a row sends its emote but leaves the picker up, so the
+        -- message box keeps the keyboard and its caret stays put.
+        row:HookScript("OnMouseDown", holdInputFocus)
         row:SetScript("OnClick", function(self)
             local chosen = self.element
             if chosen and picker.onEmote then
@@ -184,11 +201,20 @@ local function initializeEmoteRow(row, element)
 end
 
 -- Fills the side panel with one of the emote lists. The picker stays up so
--- the other list (or an emoji) can still be picked.
+-- the other list (or an emoji) can still be picked. Pressing the same footer
+-- button again puts the list away, the way a toggle should; pressing the other
+-- one swaps the list rather than closing it.
 local function showEmoteList(mode)
-    local isSound = mode == "sound"
     local panel = picker.emotePanel
-    panel.title:SetText(isSound and "Sound emotes" or "All emotes")
+    if panel:IsShown() and picker.emoteMode == mode then
+        panel:Hide()
+        picker.emoteMode = nil
+        UI.SetButtonActive(picker.allButton, false)
+        UI.SetButtonActive(picker.soundButton, false)
+        return
+    end
+    local isSound = mode == "sound"
+    panel.title:SetText(isSound and "Sound emotes" or "Text emotes")
     panel.emoteList:SetDataProvider(CreateDataProvider(emoteElements(isSound)),
         ScrollBoxConstants.RetainScrollPosition)
     C_Timer.After(0, function()
@@ -198,12 +224,13 @@ local function showEmoteList(mode)
                 ScrollBoxConstants.NoScrollInterpolation)
         end
     end)
+    picker.emoteMode = mode
     UI.SetButtonActive(picker.allButton, not isSound)
     UI.SetButtonActive(picker.soundButton, isSound)
     panel:Show()
 end
 
--- The list window that appears to the right of the picker when "All emotes"
+-- The list window that appears to the right of the picker when "Text emotes"
 -- or "Sound emotes" is pressed, built like the picker itself.
 local function createEmotePanel(frame)
     local panel = CreateFrame("Frame", nil, frame)
@@ -217,16 +244,14 @@ local function createEmotePanel(frame)
     panel:EnableMouse(true)
     -- Clicking the list's own padding keeps the keyboard in the message box,
     -- the same as clicking the picker's empty space does.
-    panel:SetScript("OnMouseDown", function()
-        if frame.input then frame.input:SetFocus() end
-    end)
+    panel:SetScript("OnMouseDown", holdInputFocus)
     panel.box = UI.CreateBox(panel, { radius = 10, border = true })
     panel.box:SetColor(Color.window)
     panel.box:SetBorderColor(Color.outline)
 
     panel.title = UI.CreateText(panel, UI.Font.item, Color.textSoft)
     panel.title:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -12)
-    panel.title:SetText("All emotes")
+    panel.title:SetText("Text emotes")
 
     panel.emoteList = CreateFrame("Frame", nil, panel, "WowScrollBoxList")
     panel.emoteList:SetPoint("TOPLEFT", panel, "TOPLEFT", 6, -PANEL_HEADER_HEIGHT)
@@ -313,6 +338,9 @@ local function initializeRow(row, element)
             -- Without this a Button never fires OnClick, so an emoji could be
             -- looked at but never picked.
             button:RegisterForClicks("LeftButtonUp")
+            -- Picking an emoticon must not move the caret, so the message box
+            -- takes the keyboard back as the mouse goes down on the grid.
+            button:HookScript("OnMouseDown", holdInputFocus)
             -- Picking an emoticon leaves the picker open, so several can be
             -- dropped into the message box in a row. It closes when the
             -- message box (or anywhere else outside) is clicked.
@@ -338,6 +366,9 @@ local function createFooterButton(frame, text, onClick)
         style = "outline", text = text, height = 26, radius = 13,
         font = UI.Font.small, onClick = onClick,
     })
+    -- The footer buttons leave the picker up too, so the message box keeps the
+    -- keyboard and its caret while they are used.
+    button:HookScript("OnMouseDown", holdInputFocus)
     return button
 end
 
@@ -411,6 +442,47 @@ local function popBubble(frame)
     end)
 end
 
+-- The window the picker pops out of stays interactive while the picker is up
+-- -- its catcher sits beneath the window, see Show -- so a click on one of the
+-- window's own controls never reaches the catcher to close the picker. Watch
+-- the controls instead: using a button or a field closes the picker while the
+-- control still does its own job, whether that is minimizing the chat, opening
+-- settings or switching conversations. Frames are marked so each is watched
+-- once however often the picker opens, and hiding an already-closed picker does
+-- nothing.
+local function watchOutsideClick(frame)
+    if not frame or frame.emojiOutsideWatched then return end
+    frame.emojiOutsideWatched = true
+    -- The button the picker popped out of is left alone: it toggles the picker.
+    -- The window itself is left alone too: it drags and resizes with the mouse,
+    -- and that shouldn't put the picker away.
+    if frame ~= picker.anchor and frame ~= picker.window then
+        -- Buttons fire OnClick on a completed click, so dragging or resizing
+        -- doesn't count. Fields are watched on the click that focuses them.
+        if frame:IsObjectType("Button") then
+            frame:HookScript("OnClick", function()
+                if picker and picker:IsShown() then picker:Hide() end
+            end)
+        elseif frame:IsObjectType("EditBox") then
+            frame:HookScript("OnMouseDown", function()
+                if picker and picker:IsShown() then picker:Hide() end
+            end)
+        elseif frame:IsMouseEnabled()
+            and (frame:GetScript("OnMouseUp") or frame:GetScript("OnMouseDown")) then
+            -- A plain frame that handles clicks itself -- the group icon tile,
+            -- a message row -- is still "outside the picker", so close on
+            -- release. Frames that only hover (or that drag the window) have no
+            -- click script and are left alone.
+            frame:HookScript("OnMouseUp", function()
+                if picker and picker:IsShown() then picker:Hide() end
+            end)
+        end
+    end
+    for _, child in ipairs({ frame:GetChildren() }) do
+        watchOutsideClick(child)
+    end
+end
+
 local function createPicker()
     local frame = CreateFrame("Frame", "TrialChatEmojiPickerFrame", UIParent)
     frame:SetFrameStrata("FULLSCREEN_DIALOG")
@@ -422,9 +494,7 @@ local function createPicker()
     -- Typing carries on while the picker is up: clicking the picker's own empty
     -- space (not one of its buttons or fields) hands the keyboard back to the
     -- message box rather than leaving it nowhere.
-    frame:SetScript("OnMouseDown", function()
-        if frame.input then frame.input:SetFocus() end
-    end)
+    frame:SetScript("OnMouseDown", holdInputFocus)
     frame.box = UI.CreateBox(frame, { radius = 10, border = true })
     frame.box:SetColor(Color.window)
     frame.box:SetBorderColor(Color.outline)
@@ -444,9 +514,7 @@ local function createPicker()
     frame.tailHit = CreateFrame("Frame", nil, frame)
     frame.tailHit:SetSize(TAIL_WIDTH, TAIL_HEIGHT)
     frame.tailHit:EnableMouse(true)
-    frame.tailHit:SetScript("OnMouseDown", function()
-        if frame.input then frame.input:SetFocus() end
-    end)
+    frame.tailHit:SetScript("OnMouseDown", holdInputFocus)
     setTailShown(frame, false)
 
     frame.title = UI.CreateText(frame, UI.Font.item, Color.textSoft)
@@ -481,8 +549,18 @@ local function createPicker()
     end)
     -- Leaving the search for the picker's empty space shouldn't end writing
     -- either: hand the keyboard back to the message box, unless another box has
-    -- deliberately taken it.
+    -- deliberately taken it. The message box's lit border steps back to the
+    -- normal look while the search has the keyboard, and comes back as it goes.
+    local function setInputFocusLook(keep)
+        if frame.input and frame.input.SetFocusLook then
+            frame.input:SetFocusLook(keep)
+        end
+    end
+    frame.search:HookScript("OnEditFocusGained", function()
+        setInputFocusLook(false)
+    end)
     frame.search:HookScript("OnEditFocusLost", function()
+        setInputFocusLook(true)
         C_Timer.After(0, function()
             if frame:IsShown() and frame.input
                 and not frame.search:HasFocus() and not frame.input:HasFocus()
@@ -530,7 +608,7 @@ local function createPicker()
     -- hide it. "Make your own" keeps its old behaviour of closing the picker
     -- and starting a custom emote in the message box.
     frame.emotePanel = createEmotePanel(frame)
-    frame.allButton = createFooterButton(frame, "All emotes", function()
+    frame.allButton = createFooterButton(frame, "Text emotes", function()
         showEmoteList("all")
     end)
     frame.allButton:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", PADDING, 12)
@@ -545,11 +623,12 @@ local function createPicker()
     writeOwn:SetPoint("LEFT", frame.soundButton, "RIGHT", 6, 0)
 
     -- Any click outside the window and the picker closes it. The catcher is
-    -- dropped just beneath the chat window (see Show) rather than over it: that
-    -- leaves the window's buttons hovering, clicking, dragging and resizing
-    -- normally without the picker closing, while the catcher still catches
-    -- every click that misses the window. (Propagation would have let clicks
-    -- through, but the window would not keep the drag.)
+    -- dropped just beneath the chat window (see Show) rather than over it, so
+    -- the window keeps hovering, dragging and resizing normally while the
+    -- catcher catches every click that misses the window. The window's own
+    -- controls close the picker themselves (see watchOutsideClick).
+    -- (Propagation would have let clicks through, but the window would not keep
+    -- the drag.)
     local catcher = CreateFrame("Frame", nil, UIParent)
     catcher:SetAllPoints(UIParent)
     catcher:SetFrameStrata("FULLSCREEN_DIALOG")
@@ -574,6 +653,11 @@ local function createPicker()
         frame:SetAlpha(1)
         frame.attached = false
         setTailShown(frame, false)
+        -- Back to the normal border: lit only while the message box is really
+        -- holding the keyboard.
+        if frame.input and frame.input.SetFocusLook then
+            frame.input:SetFocusLook(false)
+        end
         if frame.onClose then frame.onClose() end
     end)
 
@@ -603,7 +687,10 @@ function TrialChatEmojiPicker.Show(options)
     -- so a resize while the picker is open can update the scale on the spot.
     picker.window = options.window
     picker.baseScale = computeScale(options.window)
+    -- Watch the window's own controls, whose clicks never reach the catcher.
+    if picker.window then watchOutsideClick(picker.window) end
     picker.emotePanel:Hide()
+    picker.emoteMode = nil
     UI.SetButtonActive(picker.allButton, false)
     UI.SetButtonActive(picker.soundButton, false)
     picker.search:SetText("")
@@ -621,11 +708,11 @@ function TrialChatEmojiPicker.Show(options)
     picker:Show()
     picker:Raise()
     picker.catcher:Show()
-    -- Sit the catcher just under the chat window, so the window stays fully
-    -- interactive while the picker is up: its buttons still hover and click and
-    -- the window can be dragged or resized without the picker closing. The
-    -- picker itself is above both, and the catcher still catches every click
-    -- that misses the window.
+    -- Sit the catcher just under the chat window, so the window can be dragged
+    -- or resized without the picker closing. The picker itself is above both;
+    -- the window's own controls close the picker as they do their job (see
+    -- watchOutsideClick), and the catcher catches every click that misses the
+    -- window.
     if picker.window then
         picker.catcher:SetFrameStrata(picker.window:GetFrameStrata())
         picker.catcher:SetFrameLevel(
@@ -634,8 +721,13 @@ function TrialChatEmojiPicker.Show(options)
     popBubble(picker)
     -- Auto-input: the message box takes the keyboard as the picker opens, so
     -- typing can start straight away and carries on across a click on the
-    -- picker's empty space.
-    if picker.input then picker.input:SetFocus() end
+    -- picker's empty space. Its border is pinned lit meanwhile, so a transient
+    -- loss of the keyboard (clicking an emoji, dragging the window) doesn't
+    -- flicker the border.
+    if picker.input then
+        if picker.input.SetFocusLook then picker.input:SetFocusLook(true) end
+        picker.input:SetFocus()
+    end
     return picker
 end
 

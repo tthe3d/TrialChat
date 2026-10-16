@@ -666,7 +666,11 @@ end
 ---------------------------------------------------------------------------
 local function updateFieldLook(field)
     field.placeholder:SetShown((field:GetText() or "") == "")
-    field.box:SetBorderColor(field:HasFocus() and Color.fieldFocus or Color.fieldBorder)
+    -- keepFocusLook holds the focused border while the field's focus is handed
+    -- back and forth (the message box while the emoji picker is up), so the
+    -- border doesn't flick to the unfocused colour in between.
+    local focused = field:HasFocus() or field.keepFocusLook
+    field.box:SetBorderColor(focused and Color.fieldFocus or Color.fieldBorder)
 end
 
 -- options: height, placeholder, maxLetters, insetLeft, insetRight, icon.
@@ -699,6 +703,13 @@ function UI.CreateField(parent, options)
     field:HookScript("OnEditFocusGained", updateFieldLook)
     field:HookScript("OnEditFocusLost", updateFieldLook)
     field:SetScript("OnEscapePressed", field.ClearFocus)
+    -- Holds the focused border look on while true, whether or not the field
+    -- really has the keyboard. Used while a popup hands focus back on every
+    -- click, to keep the border from flickering between the two states.
+    field.SetFocusLook = function(self, keep)
+        self.keepFocusLook = keep and true or nil
+        updateFieldLook(self)
+    end
     updateFieldLook(field)
     return field
 end

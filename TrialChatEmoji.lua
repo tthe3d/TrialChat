@@ -231,6 +231,11 @@ function TrialChatCommon.ApplyEmojiMarkup(text)
     local out = {}
     local position = 1
     local length = #text
+    -- True when the last thing taken was an emoticon. The character before an
+    -- emoticon that follows one directly (":D:D") is the previous shortcut's
+    -- last letter, which would otherwise read as the middle of a word and stop
+    -- the second picture from being drawn.
+    local previousWasEmoji = false
     while position <= length do
         local char = string.sub(text, position, position)
         local candidates = TrialChatCommon.EmojiByFirstChar[char]
@@ -247,7 +252,8 @@ function TrialChatCommon.ApplyEmojiMarkup(text)
                     local after = position + shortcutLength <= length
                         and string.sub(text, position + shortcutLength,
                             position + shortcutLength) or nil
-                    if not isWordChar(before) and not isWordChar(after) then
+                    if not (isWordChar(before) and not previousWasEmoji)
+                        and not isWordChar(after) then
                         -- Two pictures with nothing between them
                         -- ("|T...|t|T...|t") don't both draw in a font string,
                         -- so put a space in front of one that follows text or
@@ -259,6 +265,7 @@ function TrialChatCommon.ApplyEmojiMarkup(text)
                         out[#out + 1] = TrialChatCommon.EmojiMarkup(entry, 1)
                         position = position + shortcutLength
                         matched = true
+                        previousWasEmoji = true
                         break
                     end
                 end
@@ -267,6 +274,7 @@ function TrialChatCommon.ApplyEmojiMarkup(text)
         if not matched then
             out[#out + 1] = char
             position = position + 1
+            previousWasEmoji = false
         end
     end
     return table.concat(out)
