@@ -60,6 +60,17 @@ local function updateRows(resetScroll)
     end
 end
 
+-- Points an icon texture at the cell of an emoticon's sprite sheet that is
+-- showing right now. The crop is inset by half a texel on each side, so the
+-- neighbouring cells don't bleed into the edge of this one.
+local function showEmojiFrame(icon, entry)
+    local count = entry.frames
+    local cell = entry.cell or 19
+    local frame = TrialChatCommon.EmojiFrame(entry, GetTime())
+    local inset = 0.5 / (count * cell)
+    icon:SetTexCoord((frame - 1) / count + inset, frame / count - inset, 0, 1)
+end
+
 -- Draws an emoticon on a button: animated ones step through their sprite
 -- sheet on every frame, the rest show their single picture.
 local function showEmoji(button, entry)
@@ -73,9 +84,7 @@ local function showEmoji(button, entry)
     local directory = TrialChatCommon.EmojiDirectory
     if entry.frames then
         icon:SetTexture(directory .. entry.file .. "-frames.png")
-        local count = entry.frames
-        local frame = TrialChatCommon.EmojiFrame(entry, GetTime())
-        icon:SetTexCoord((frame - 1) / count, frame / count, 0, 1)
+        showEmojiFrame(icon, entry)
     else
         icon:SetTexture(directory .. entry.file .. ".png")
         icon:SetTexCoord(0, 1, 0, 1)
@@ -109,9 +118,7 @@ local function initializeRow(row, element)
             button:SetScript("OnUpdate", function(self)
                 local emoji = self.emoji
                 if not emoji or not emoji.frames then return end
-                local count = emoji.frames
-                local frame = TrialChatCommon.EmojiFrame(emoji, GetTime())
-                self.icon:SetTexCoord((frame - 1) / count, frame / count, 0, 1)
+                showEmojiFrame(self.icon, emoji)
             end)
             -- Without this a Button never fires OnClick, so an emoji could be
             -- looked at but never picked.

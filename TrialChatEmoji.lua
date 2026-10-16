@@ -9,10 +9,13 @@ TrialChatCommon = TrialChatCommon or {}
 
 TrialChatCommon.EmojiDirectory = "Interface\\AddOns\\TrialChat\\Media\\Emoji\\"
 
--- How big an emoji is drawn in a chat message, in pixels.
-TrialChatCommon.EmojiTextSize = 18
--- How fast animated emoji play, in frames per second.
-TrialChatCommon.EmojiFPS = 8
+-- How big an emoji is drawn in a chat message, in pixels. A sprite cell is 19
+-- pixels wide, so drawing at 19 keeps one texture pixel on one screen pixel:
+-- the picture stays sharp and no cell bleeds into the next one.
+TrialChatCommon.EmojiTextSize = 19
+-- How fast animated emoji play, in frames per second. The original emoticons
+-- step every 200 ms, so five frames a second.
+TrialChatCommon.EmojiFPS = 5
 
 TrialChatCommon.EmojiList = {
     { name = "Smile", shortcut = ":)", file = "smile" },
@@ -91,6 +94,9 @@ TrialChatCommon.EmojiList = {
     { name = "Eye-rolling smile", shortcut = "8-)", file = "eye-rolling-smile", frames = 6, cell = 19 },
     { name = "Sleepy smile", shortcut = "|-)", file = "sleepy-smile", frames = 9, cell = 19 },
     { name = "Bunny", shortcut = "('.')", file = "bunny" },
+    { name = "Cigarette", shortcut = "(CIG)", file = "cigarette", frames = 5, cell = 19 },
+    { name = "Fingers crossed", shortcut = "(CRS)", file = "fingers-crossed" },
+    { name = "Cuffs", shortcut = "(CF)", file = "cuffs" },
 }
 
 -- Look an emoticon up by its shortcut (what the player types) or by its file
@@ -126,7 +132,7 @@ end
 -- The picture for an emoticon as an inline texture a font string can show.
 -- An animated emoticon draws one cell of its sprite sheet, chosen by frame.
 function TrialChatCommon.EmojiMarkup(entry, frame)
-    local size = TrialChatCommon.EmojiTextSize or 18
+    local size = TrialChatCommon.EmojiTextSize or 19
     local directory = TrialChatCommon.EmojiDirectory
     if not entry.frames then
         return "|T" .. directory .. entry.file .. ".png:" .. size .. ":" .. size .. "|t"
@@ -146,7 +152,7 @@ end
 function TrialChatCommon.EmojiFrame(entry, time)
     if not entry.frames then return 1 end
     local count = entry.frames
-    local tick = math.floor((time or GetTime()) * (TrialChatCommon.EmojiFPS or 8)
+    local tick = math.floor((time or GetTime()) * (TrialChatCommon.EmojiFPS or 5)
         + (entry.offset or 0))
     return tick % count + 1
 end

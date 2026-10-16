@@ -191,7 +191,7 @@ end
 
 local function tickEmoji(row, elapsed)
     row.emojiElapsed = (row.emojiElapsed or 0) + elapsed
-    local step = 1 / (TrialChatCommon.EmojiFPS or 8)
+    local step = 1 / (TrialChatCommon.EmojiFPS or 5)
     if row.emojiElapsed < step then return end
     row.emojiElapsed = 0
     redrawEmoji(row)
