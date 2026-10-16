@@ -18,7 +18,27 @@ local FOOTER_HEIGHT = 48
 local SCROLL_GAP = 14
 local WIDTH = PADDING * 2 + COLUMNS * CELL + SCROLL_GAP
 
+-- The emote list that pops out to the right of the picker: the same kind of
+-- list as the members panel in the main window.
+local PANEL_WIDTH = 190
+local PANEL_HEADER_HEIGHT = 34
+local PANEL_ROW_HEIGHT = 26
+
 local picker
+
+-- Whether the cursor is over a frame, no matter what lies on top of it. The
+-- catcher covers the whole screen while the picker is up, so a hit test that
+-- respected stacking would always say no.
+local function cursorOver(region)
+    if not region or not region:IsShown() then return false end
+    local left, right = region:GetLeft(), region:GetRight()
+    local bottom, top = region:GetBottom(), region:GetTop()
+    if not left or not right or not bottom or not top then return false end
+    local scale = region:GetEffectiveScale()
+    local x, y = GetCursorPosition()
+    x, y = x / scale, y / scale
+    return x >= left and x <= right and y >= bottom and y <= top
+end
 
 -- The emoji list sliced into rows of COLUMNS, one row per scroll box element.
 local function getRows(query)
@@ -58,6 +78,131 @@ local function updateRows(resetScroll)
             end
         end)
     end
+end
+
+-- Every emote of one kind, sorted, ready for the panel's list. All emotes are
+-- the ones behind "/", sound emotes the ones behind "//".
+local function emoteElements(isSound)
+    local source = (isSound and TrialChatCommon.SoundEmotes
+        or TrialChatCommon.EmoteDescriptions) or {}
+    local names = {}
+    for name in pairs(source) do
+        names[#names + 1] = name
+    end
+    table.sort(names)
+    local elements = {}
+    for index = 1, #names do
+        local name = names[index]
+        elements[index] = {
+            text = name,
+            isSound = isSound,
+            description = isSound and nil or source[name],
+        }
+    end
+    return elements
+end
+
+-- A row in the emote list: the emote's name, and a click that sends it to the
+-- conversation. Text emotes get a tooltip with what they do; sound emotes are
+-- just a name and a sound, so hovering them shows nothing.
+local function initializeEmoteRow(row, element)
+    if not row.label then
+        row:SetHighlightTexture(UI.WHITE)
+        local highlight = row:GetHighlightTexture()
+        highlight:SetAllPoints()
+        highlight:SetAlpha(0.08)
+        row.label = UI.CreateText(row, UI.Font.item, Color.textSoft)
+        row.label:SetPoint("LEFT", row, "LEFT", 10, 0)
+        row.label:SetPoint("RIGHT", row, "RIGHT", -10, 0)
+        row.label:SetJustifyH("LEFT")
+        row.label:SetWordWrap(false)
+        row:RegisterForClicks("LeftButtonUp")
+        row:SetScript("OnClick", function(self)
+            local chosen = self.element
+            if chosen and picker.onEmote then
+                picker.onEmote(chosen.text, chosen.isSound)
+            end
+        end)
+        row:SetScript("OnEnter", function(self)
+            local chosen = self.element
+            if not chosen or chosen.isSound then return end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(chosen.text)
+            if chosen.description and chosen.description ~= "" then
+                GameTooltip:AddLine(chosen.description, 1, 1, 1, true)
+            end
+            GameTooltip:AddLine("/" .. chosen.text, 0.6, 0.6, 0.6)
+            GameTooltip:Show()
+        end)
+        row:SetScript("OnLeave", function()
+            GameTooltip_Hide()
+        end)
+    end
+    -- Rows are reused as the list scrolls.
+    row.element = element
+    row.label:SetText(element.text)
+end
+
+-- Fills the side panel with one of the emote lists. The picker stays up so
+-- the other list (or an emoji) can still be picked.
+local function showEmoteList(mode)
+    local isSound = mode == "sound"
+    local panel = picker.emotePanel
+    panel.title:SetText(isSound and "Sound emotes" or "All emotes")
+    panel.emoteList:SetDataProvider(CreateDataProvider(emoteElements(isSound)),
+        ScrollBoxConstants.RetainScrollPosition)
+    C_Timer.After(0, function()
+        if picker:IsShown() and panel.emoteList then
+            panel.emoteList:ScrollToElementDataIndex(1,
+                ScrollBoxConstants.AlignBegin, 0,
+                ScrollBoxConstants.NoScrollInterpolation)
+        end
+    end)
+    UI.SetButtonActive(picker.allButton, not isSound)
+    UI.SetButtonActive(picker.soundButton, isSound)
+    panel:Show()
+end
+
+-- The list window that appears to the right of the picker when "All emotes"
+-- or "Sound emotes" is pressed, built like the picker itself.
+local function createEmotePanel(frame)
+    local panel = CreateFrame("Frame", nil, frame)
+    panel:SetPoint("TOPLEFT", frame, "TOPRIGHT", 6, 0)
+    panel:SetPoint("BOTTOMLEFT", frame, "BOTTOMRIGHT", 6, 0)
+    panel:SetWidth(PANEL_WIDTH)
+    -- Above the catcher that closes everything on an outside click.
+    panel:SetFrameLevel(frame:GetFrameLevel() + 1)
+    -- Swallow clicks on the panel's padding, so only a click outside both the
+    -- picker and the list closes them.
+    panel:EnableMouse(true)
+    panel.box = UI.CreateBox(panel, { radius = 10, border = true })
+    panel.box:SetColor(Color.window)
+    panel.box:SetBorderColor(Color.outline)
+
+    panel.title = UI.CreateText(panel, UI.Font.item, Color.textSoft)
+    panel.title:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -12)
+    panel.title:SetText("All emotes")
+
+    panel.emoteList = CreateFrame("Frame", nil, panel, "WowScrollBoxList")
+    panel.emoteList:SetPoint("TOPLEFT", panel, "TOPLEFT", 6, -PANEL_HEADER_HEIGHT)
+    panel.emoteList:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT",
+        -6 - SCROLL_GAP, 8)
+    local scrollBar = CreateFrame("EventFrame", nil, panel, "MinimalScrollBar")
+    scrollBar:SetPoint("TOPLEFT", panel.emoteList, "TOPRIGHT", 2, -4)
+    scrollBar:SetPoint("BOTTOMLEFT", panel.emoteList, "BOTTOMRIGHT", 2, 4)
+    panel.scrollBar = scrollBar
+
+    local view = CreateScrollBoxListLinearView(0, 0, 0, 0, 0)
+    view:SetElementExtent(PANEL_ROW_HEIGHT)
+    view:SetElementFactory(function(factory)
+        factory("Button", initializeEmoteRow)
+    end)
+    ScrollUtil.InitScrollBoxListWithScrollBar(panel.emoteList, scrollBar, view)
+    ScrollUtil.AddManagedScrollBarVisibilityBehavior(panel.emoteList, scrollBar)
+    panel.view = view
+
+    panel:Hide()
+    return panel
 end
 
 -- Points an icon texture at the cell of an emoticon's sprite sheet that is
@@ -123,9 +268,11 @@ local function initializeRow(row, element)
             -- Without this a Button never fires OnClick, so an emoji could be
             -- looked at but never picked.
             button:RegisterForClicks("LeftButtonUp")
+            -- Picking an emoticon leaves the picker open, so several can be
+            -- dropped into the message box in a row. It closes when the
+            -- message box (or anywhere else outside) is clicked.
             button:SetScript("OnClick", function(self)
                 local onPick = picker.onPick
-                picker:Hide()
                 if onPick and self.emoji then
                     onPick(self.emoji)
                 end
@@ -160,7 +307,12 @@ local function createPicker()
     frame:SetMovable(true)
     frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    frame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        -- Dragging drops the keyboard focus, so hand it back to the message
+        -- box: writing carries on while the picker is moved around.
+        if self.input then self.input:SetFocus() end
+    end)
     frame.box = UI.CreateBox(frame, { radius = 10, border = true })
     frame.box:SetColor(Color.window)
     frame.box:SetBorderColor(Color.outline)
@@ -171,7 +323,13 @@ local function createPicker()
 
     frame.close = UI.CreateButton(frame, {
         style = "ghost", icon = "close", iconSize = 12, width = 28, height = 28,
-        tooltip = "Close", onClick = function() frame:Hide() end,
+        tooltip = "Close",
+        -- Closing the picker keeps the message box focused, so writing carries
+        -- on rather than stopping with the picker.
+        onClick = function()
+            if frame.input then frame.input:SetFocus() end
+            frame:Hide()
+        end,
     })
     frame.close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -8)
 
@@ -189,7 +347,25 @@ local function createPicker()
     frame.search:HookScript("OnTextChanged", function()
         updateRows(true)
     end)
+    -- Leaving the search for the picker's empty space shouldn't end writing
+    -- either: hand the keyboard back to the message box.
+    frame.search:HookScript("OnEditFocusLost", function()
+        C_Timer.After(0, function()
+            if frame:IsShown() and frame.input
+                and not frame.search:HasFocus() and not frame.input:HasFocus() then
+                frame.input:SetFocus()
+            end
+        end)
+    end)
     frame.search:SetScript("OnEnterPressed", frame.search.ClearFocus)
+    -- Escape in the search closes the picker and hands writing back to the
+    -- message box, rather than just leaving the field.
+    frame.search:SetScript("OnEscapePressed", function(self)
+        self:ClearFocus()
+        -- Focus the message box first, so the window never dims on the way out.
+        if frame.input then frame.input:SetFocus() end
+        frame:Hide()
+    end)
 
     local scrollBox = CreateFrame("Frame", nil, frame, "WowScrollBoxList")
     scrollBox:SetPoint("TOPLEFT", frame, "TOPLEFT", PADDING, -HEADER_HEIGHT)
@@ -215,23 +391,23 @@ local function createPicker()
     ScrollUtil.AddManagedScrollBarVisibilityBehavior(scrollBox, scrollBar)
     frame.view = view
 
-    -- The emote lists and the "write your own" entry live under the grid, in
-    -- the same panel the emoji are picked from.
-    local allEmotes = createFooterButton(frame, "All emotes", function()
-        frame:Hide()
-        if frame.onAllEmotes then frame.onAllEmotes() end
+    -- The emote lists pop out to the right of the picker, so they no longer
+    -- hide it. "Make your own" keeps its old behaviour of closing the picker
+    -- and starting a custom emote in the message box.
+    frame.emotePanel = createEmotePanel(frame)
+    frame.allButton = createFooterButton(frame, "All emotes", function()
+        showEmoteList("all")
     end)
-    allEmotes:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", PADDING, 12)
-    local soundEmotes = createFooterButton(frame, "Sound emotes", function()
-        frame:Hide()
-        if frame.onSoundEmotes then frame.onSoundEmotes() end
+    frame.allButton:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", PADDING, 12)
+    frame.soundButton = createFooterButton(frame, "Sound emotes", function()
+        showEmoteList("sound")
     end)
-    soundEmotes:SetPoint("LEFT", allEmotes, "RIGHT", 6, 0)
+    frame.soundButton:SetPoint("LEFT", frame.allButton, "RIGHT", 6, 0)
     local writeOwn = createFooterButton(frame, "Make your own", function()
         frame:Hide()
         if frame.onWriteOwn then frame.onWriteOwn() end
     end)
-    writeOwn:SetPoint("LEFT", soundEmotes, "RIGHT", 6, 0)
+    writeOwn:SetPoint("LEFT", frame.soundButton, "RIGHT", 6, 0)
 
     -- Any click outside the picker closes it.
     local catcher = CreateFrame("Frame", nil, UIParent)
@@ -239,11 +415,19 @@ local function createPicker()
     catcher:SetFrameStrata("FULLSCREEN_DIALOG")
     catcher:SetFrameLevel(4999)
     catcher:EnableMouse(true)
-    catcher:SetScript("OnMouseDown", function() frame:Hide() end)
+    catcher:SetScript("OnMouseDown", function()
+        frame:Hide()
+        -- Clicking the message box closes the picker and starts typing there.
+        local input = frame.input
+        if input and cursorOver(input) then
+            input:SetFocus()
+        end
+    end)
     frame.catcher = catcher
     frame:SetScript("OnHide", function()
         catcher:Hide()
         GameTooltip_Hide()
+        if frame.onClose then frame.onClose() end
     end)
 
     tinsert(UISpecialFrames, "TrialChatEmojiPickerFrame")
@@ -252,15 +436,21 @@ local function createPicker()
 end
 
 -- Opens the picker. options.onPick(entry) is called with the chosen emoticon;
--- options.onAllEmotes(button) and options.onSoundEmotes(button) open the emote
--- lists, and options.onWriteOwn() starts a custom emote.
+-- options.onEmote(name, isSound) is called when an entry in the emote list is
+-- clicked; options.onWriteOwn() starts a custom emote. options.input is the
+-- message box: clicking it closes the picker and focuses it. options.onClose()
+-- runs when the picker closes, so the window can fade back.
 function TrialChatEmojiPicker.Show(options)
     if not picker then picker = createPicker() end
     options = options or {}
     picker.onPick = options.onPick
-    picker.onAllEmotes = options.onAllEmotes
-    picker.onSoundEmotes = options.onSoundEmotes
+    picker.onEmote = options.onEmote
     picker.onWriteOwn = options.onWriteOwn
+    picker.onClose = options.onClose
+    picker.input = options.input
+    picker.emotePanel:Hide()
+    UI.SetButtonActive(picker.allButton, false)
+    UI.SetButtonActive(picker.soundButton, false)
     picker.search:SetText("")
     picker.search:ClearFocus()
     updateRows(false)
@@ -268,6 +458,15 @@ function TrialChatEmojiPicker.Show(options)
     picker:Raise()
     picker.catcher:Show()
     return picker
+end
+
+function TrialChatEmojiPicker.IsShown()
+    return picker ~= nil and picker:IsShown()
+end
+
+-- Whether the picker's search box is the one holding the keyboard.
+function TrialChatEmojiPicker.IsSearchFocused()
+    return picker ~= nil and picker.search ~= nil and picker.search:HasFocus()
 end
 
 function TrialChatEmojiPicker.Hide()

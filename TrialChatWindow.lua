@@ -135,8 +135,12 @@ local function updateAlpha()
         or (addListenerField and addListenerField:HasFocus())
     local recentMessage = lastMessageAt
         and GetTime() - lastMessageAt < MESSAGE_VISIBLE_SECONDS
+    -- The emoji picker is part of using the window: it stays lit while the
+    -- picker is up, even if moving it around steals the keyboard focus.
+    local pickerOpen = TrialChatEmojiPicker and TrialChatEmojiPicker.IsShown
+        and TrialChatEmojiPicker.IsShown()
     local visible = (window:IsShown() and window:IsMouseOver()) or focused or recentMessage
-        or (inviteCard and inviteCard:IsShown())
+        or (inviteCard and inviteCard:IsShown()) or pickerOpen
     TrialChatCommon.FadeTo(window, visible and 1 or IDLE_ALPHA)
 end
 
@@ -430,46 +434,20 @@ local function sendWithReply(message)
     sendToConversation(message, takePendingReply())
 end
 
--- The list of every emote, picked from the picker's "All emotes" button.
-local function showAllEmotes(owner)
-    MenuUtil.CreateContextMenu(owner, function(_, root)
-        root:CreateTitle("All emotes")
-        if root.SetScrollMode then root:SetScrollMode(400) end
-        local names = {}
-        for emote in pairs(TrialChatCommon.EmoteDescriptions or {}) do
-            names[#names + 1] = emote
-        end
-        table.sort(names)
-        for _, emote in ipairs(names) do
-            root:CreateButton("/" .. emote, function()
-                sendToConversation("/" .. emote)
-            end)
-        end
-    end)
-end
-
--- The list of sound emotes, picked from the picker's "Sound emotes" button.
-local function showSoundEmotes(owner)
-    local soundEmotes = {}
-    for emote in pairs(TrialChatCommon.SoundEmotes or {}) do
-        soundEmotes[#soundEmotes + 1] = emote
-    end
-    table.sort(soundEmotes)
-    MenuUtil.CreateContextMenu(owner, function(_, root)
-        root:CreateTitle("Sound emotes")
-        if root.SetScrollMode then root:SetScrollMode(400) end
-        for _, emote in ipairs(soundEmotes) do
-            root:CreateButton("//" .. emote, function()
-                sendToConversation("//" .. emote)
-            end)
-        end
-    end)
-end
-
 -- The smiley button opens the emoji grid; picking one drops its shortcut into
--- the message box. The emote lists and "make your own" sit under the grid.
-local function showEmoteMenu(owner)
+-- the message box. The emote lists open beside the grid and "make your own"
+-- sits under it.
+local function showEmoteMenu()
+    -- Put the cursor in the message box as the picker opens, so the window
+    -- stays lit (it fades while nothing is focused) and typing can start right
+    -- away. Clicking an emoji drops it in at the cursor.
+    if composer.input then
+        composer.input:SetFocus()
+        updateAlpha()
+    end
     TrialChatEmojiPicker.Show({
+        input = composer.input,
+        onClose = updateAlpha,
         onPick = function(entry)
             local input = composer.input
             if not input then return end
@@ -481,8 +459,9 @@ local function showEmoteMenu(owner)
             input:Insert(entry.shortcut)
             input:SetFocus()
         end,
-        onAllEmotes = function() showAllEmotes(owner) end,
-        onSoundEmotes = function() showSoundEmotes(owner) end,
+        onEmote = function(name, isSound)
+            sendToConversation((isSound and "//" or "/") .. name)
+        end,
         onWriteOwn = function()
             local input = composer.input
             if not input then return end
@@ -1208,7 +1187,7 @@ end
 local function createComposer()
     local emoteButton = UI.CreateButton(main, {
         icon = "smile", iconSize = 18, width = 36, height = 36, tooltip = "Emotes",
-        onClick = function(self) showEmoteMenu(self) end,
+        onClick = function() showEmoteMenu() end,
     })
     emoteButton:SetPoint("BOTTOMLEFT", main, "BOTTOMLEFT", 20, 14)
 
@@ -1228,9 +1207,32 @@ local function createComposer()
     input:SetPoint("RIGHT", composer.counter, "LEFT", -10, 0)
     TrialChatCommon.RegisterLinkInput(input)
     input:SetScript("OnEnterPressed", sendComposerMessage)
+    -- Escape with the emoji picker up closes just the picker and keeps the
+    -- message box focused, so writing carries on; otherwise it leaves the box
+    -- like a normal field.
+    input:SetScript("OnEscapePressed", function(self)
+        if TrialChatEmojiPicker.IsShown() then
+            TrialChatEmojiPicker.Hide()
+            self:SetFocus()
+            return
+        end
+        self:ClearFocus()
+    end)
     input:HookScript("OnTextChanged", updateCounter)
     input:HookScript("OnEditFocusGained", updateAlpha)
-    input:HookScript("OnEditFocusLost", updateAlpha)
+    input:HookScript("OnEditFocusLost", function()
+        updateAlpha()
+        -- Clicking the emoji picker's own empty space shouldn't stop writing:
+        -- while the picker is up and its search box isn't the one taking focus,
+        -- hand the keyboard straight back to the message box.
+        C_Timer.After(0, function()
+            if TrialChatEmojiPicker.IsShown()
+                and not TrialChatEmojiPicker.IsSearchFocused()
+                and not input:HasFocus() then
+                input:SetFocus()
+            end
+        end)
+    end)
 
     -- The reply strip sits between the messages and the message box.
     replyBar = CreateFrame("Frame", nil, main)

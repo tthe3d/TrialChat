@@ -248,6 +248,14 @@ function TrialChatCommon.ApplyEmojiMarkup(text)
                         and string.sub(text, position + shortcutLength,
                             position + shortcutLength) or nil
                     if not isWordChar(before) and not isWordChar(after) then
+                        -- Two pictures with nothing between them
+                        -- ("|T...|t|T...|t") don't both draw in a font string,
+                        -- so put a space in front of one that follows text or
+                        -- another picture directly. An existing space already
+                        -- separates them, and one is not needed at the start.
+                        if before and before ~= " " then
+                            out[#out + 1] = " "
+                        end
                         out[#out + 1] = TrialChatCommon.EmojiMarkup(entry, 1)
                         position = position + shortcutLength
                         matched = true
