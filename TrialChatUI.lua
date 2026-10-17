@@ -377,18 +377,24 @@ end
 
 -- Shows the player's portrait when the game can draw it, their race's
 -- portrait when it knows their race, and otherwise their first letter.
-local function setAvatarPerson(avatar, fullName, color)
+local function setAvatarPerson(avatar, fullName, color, classFile)
     UI.Tint(avatar.ring, color)
     local unit = TrialChatCommon.FindUnit(fullName)
-    local atlas
+    local atlas, classTexture
     if not unit then
-        atlas = UI.GetRaceAtlas(TrialChatCommon.GetKnownLook(fullName))
+        classTexture = classFile
+            and TrialChatCommon.GetIconTexture("ClassIcon_" .. classFile)
+        if not classTexture then
+            atlas = UI.GetRaceAtlas(TrialChatCommon.GetKnownLook(fullName))
+        end
     end
     avatar.portrait:SetShown(unit ~= nil)
-    avatar.face:SetShown(atlas ~= nil)
-    avatar.letter:SetShown(not unit and not atlas)
+    avatar.face:SetShown(unit == nil and (classTexture ~= nil or atlas ~= nil))
+    avatar.letter:SetShown(not unit and not classTexture and not atlas)
     if unit then
         SetPortraitTexture(avatar.portrait, unit)
+    elseif classTexture then
+        avatar.face:SetTexture(classTexture)
     elseif atlas then
         avatar.face:SetAtlas(atlas)
     else

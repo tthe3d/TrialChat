@@ -43,6 +43,11 @@ local SEPARATOR = " \194\183 " -- a middle dot between details
 
 local Nearby = TrialChatNearby
 local Groups = TrialChatGroups
+local Whispers = TrialChatWhispers
+
+local function isWhisper(key)
+    return Whispers:IsWhisper(key)
+end
 
 local window
 local sidebar
@@ -152,12 +157,16 @@ end
 
 local function getConversationName(key)
     if isNearby(key) then return "Nearby" end
+    local whisper = Whispers:GetInfo(key)
+    if whisper then return whisper.displayName or whisper.name end
     local info = Groups:GetInfo(key)
     return info and info.name or key
 end
 
 local function getMessageLimit()
-    return isNearby(selected) and Nearby.MAX_MESSAGE_BYTES or Groups.MAX_MESSAGE_BYTES
+    if isNearby(selected) then return Nearby.MAX_MESSAGE_BYTES end
+    if isWhisper(selected) then return Whispers.MAX_MESSAGE_BYTES end
+    return Groups.MAX_MESSAGE_BYTES
 end
 
 local function colorForName(name)
@@ -219,6 +228,10 @@ local function renderMessages(options)
         format = formatNearbyMessage
         emptyText = "No messages yet. Players near you who use TrialChat"
             .. " will see what you write here."
+    elseif isWhisper(selected) then
+        entries = Whispers:GetHistory(selected)
+        format = formatGroupMessage
+        emptyText = "No whispers here yet."
     else
         entries = Groups:GetHistory(selected)
         format = formatGroupMessage
@@ -286,12 +299,19 @@ end
 
 local function updateHeader()
     local nearbyChat = isNearby(selected)
-    local info = not nearbyChat and Groups:GetInfo(selected)
+    local whisperChat = isWhisper(selected)
+    local membersShown = getSettings().membersShown
+    local info = not nearbyChat and not whisperChat and Groups:GetInfo(selected)
     header.title:SetText(getConversationName(selected))
-    local iconTexture = not nearbyChat and Groups:GetIcon(selected)
+    local iconTexture = not nearbyChat and not whisperChat and Groups:GetIcon(selected)
     iconTexture = iconTexture and TrialChatCommon.GetIconTexture(iconTexture)
     if nearbyChat then
         header.tile:SetLook(Color.tile, Color.textSoft, nil, "pin")
+    elseif whisperChat then
+        local whisper = Whispers:GetInfo(selected)
+        local classFile = whisper and TrialChatCommon.GetKnownClass(whisper.name)
+        header.tile:SetLook(UI.ClassColor(classFile) or Color.tile, Color.textSoft,
+            getInitials(getConversationName(selected)))
     elseif iconTexture then
         header.tile.box:SetColor(Color.tile)
         header.tile:SetTexture(iconTexture)
@@ -308,6 +328,8 @@ local function updateHeader()
             subtitle = subtitle .. SEPARATOR .. plural(saved, "saved listener")
         end
         header.subtitle:SetText(subtitle)
+    elseif whisperChat then
+        header.subtitle:SetText("Whisper" .. SEPARATOR .. "normal chat")
     elseif info then
         local subtitle = info.online .. " online" .. SEPARATOR .. plural(info.members, "member")
         if info.loadingHistory then
@@ -321,9 +343,9 @@ local function updateHeader()
         header.muteButton.muted = info.muted
     end
     updateSyncButton(info or nil)
-    header.syncButton:SetShown(not nearbyChat)
-    header.muteButton:SetShown(not nearbyChat)
-    UI.SetButtonActive(header.membersButton, getSettings().membersShown)
+    header.syncButton:SetShown(not nearbyChat and not whisperChat)
+    header.muteButton:SetShown(not nearbyChat and not whisperChat)
+    UI.SetButtonActive(header.membersButton, membersShown)
 end
 
 ---------------------------------------------------------------------------
@@ -346,6 +368,8 @@ local function sendToConversation(message, reply)
     if strtrim(message or "") == "" then return end
     if isNearby(selected) then
         Nearby:Send(message, reply)
+    elseif isWhisper(selected) then
+        Whispers:SendMessage(selected, message, reply)
     else
         Groups:SendMessage(selected, message, reply)
     end
@@ -529,6 +553,27 @@ local function updateMembers()
                 addMember(listener, false, nil, true)
             end
         end
+    elseif isWhisper(selected) then
+        -- A whisper is only ever the two of you. The game tells us nothing
+        -- about the other player's presence, so they are shown the way the
+        -- sidebar already shows their conversation: as someone you can talk
+        -- to, with their class color once it's known.
+        local whisper = Whispers:GetInfo(selected)
+        local people = {
+            { fullName = TrialChatCommon.GetPlayerFullName(), isSelf = true,
+                classFile = TrialChatCommon.GetPlayerClass() },
+        }
+        if whisper and not TrialChatCommon.IsSelf(whisper.name) then
+            people[#people + 1] = {
+                fullName = whisper.name,
+                classFile = TrialChatCommon.GetKnownClass(whisper.name),
+            }
+        end
+        addLabel("Whisper - " .. #people)
+        for _, person in ipairs(people) do
+            local nearbyTag = not person.isSelf and Nearby:IsActive(person.fullName)
+            addMember(person, true, nearbyTag and "nearby")
+        end
     else
         local online, offline = Groups:GetMemberList(selected)
         addLabel("Online - " .. #online)
@@ -564,7 +609,27 @@ local function onMemberClick(row, button)
     local element = row.element
     if not element or element.isSelf then return end
     if button == "RightButton" then
-        TrialChatCommon.ShowPlayerOptions(element.fullName, element.fullName, button)
+        if isNearby(selected) or isWhisper(selected) then
+            -- Nearby and a whisper are one-on-one: the game's own player
+            -- menu already carries the TrialChat entries for the player.
+            TrialChatCommon.ShowPlayerOptions(element.fullName, element.fullName, button)
+            return
+        end
+        -- Group member list: a menu carrying the same group entries as the
+        -- game's player menu (invite, and remove for a group you created).
+        local memberName = element.fullName
+        MenuUtil.CreateContextMenu(row, function(_, root)
+            root:CreateTitle(element.name)
+            root:CreateButton("Whisper", function()
+                Whispers:OpenConversation(memberName)
+            end)
+            root:CreateButton("Whisper in normal chat", function()
+                if ChatFrame_OpenChat then
+                    ChatFrame_OpenChat("/w " .. memberName)
+                end
+            end)
+            Groups:AddPlayerMenu(root, memberName)
+        end)
     elseif element.canSave then
         Nearby:ToggleSavedListener(element.fullName)
     end
@@ -583,7 +648,10 @@ local function onMemberEnter(row)
                 or "Left-click to keep this listener: they hear your nearby chat wherever they are.",
                 1, 1, 1, true)
         end
-        GameTooltip:AddLine("Right-click for player options.", 1, 1, 1, true)
+        local hint = (isNearby(selected) or isWhisper(selected))
+            and "Right-click for player options."
+            or "Right-click to whisper, invite or remove this member."
+        GameTooltip:AddLine(hint, 1, 1, 1, true)
     end
     GameTooltip:Show()
 end
@@ -672,6 +740,17 @@ local function updateConversations()
             }
         end
     end
+    for _, conversation in ipairs(Whispers:GetConversations()) do
+        if matches(conversation.name) then
+            elements[#elements + 1] = {
+                key = conversation.id,
+                name = conversation.name,
+                state = "online",
+                unread = conversation.unread,
+                meta = "Whisper",
+            }
+        end
+    end
     conversationList:SetDataProvider(CreateDataProvider(elements),
         ScrollBoxConstants.RetainScrollPosition)
     if minimal then
@@ -692,11 +771,29 @@ local function getMinimalConversations()
             }
         end
     end
+    for _, conversation in ipairs(Whispers:GetConversations()) do
+        conversations[#conversations + 1] = {
+            key = conversation.id, name = conversation.name, unread = conversation.unread,
+        }
+    end
     return conversations
 end
 
 local function showConversationMenu(owner, element)
     if isNearby(element.key) then return end
+    if isWhisper(element.key) then
+        MenuUtil.CreateContextMenu(owner, function(_, root)
+            root:CreateTitle(element.name)
+            root:CreateButton("Clear history", function()
+                Whispers:ClearHistory(element.key)
+            end)
+            root:CreateButton("Remove conversation", function()
+                Whispers:RemoveConversation(element.key)
+                selectConversation(NEARBY)
+            end)
+        end)
+        return
+    end
 
     local id = element.key
     MenuUtil.CreateContextMenu(owner, function(_, root)
@@ -783,6 +880,10 @@ local function initConversationRow(row, element)
         row.selection:SetColor(Color.selected)
         row.tile = UI.CreateTile(row, 28)
         row.tile:SetPoint("LEFT", row, "LEFT", 8, 0)
+        row.avatar = UI.CreateAvatar(row, 28)
+        row.avatar:SetPoint("LEFT", row, "LEFT", 8, 0)
+        row.avatar:EnableMouse(false)
+        row.avatar:Hide()
         row.badge = UI.CreateBadge(row)
         row.badge:SetPoint("RIGHT", row, "RIGHT", -10, 0)
         row.meta = UI.CreateText(row, UI.Font.small, Color.muted)
@@ -804,9 +905,16 @@ local function initConversationRow(row, element)
     row.selection:SetShown(isSelected)
     updateConversationRowHover(row)
 
-    local iconTexture = element.icon
+    local whisper = isWhisper(element.key)
+    row.tile:SetShown(not whisper)
+    row.avatar:SetShown(whisper)
+    local iconTexture = not whisper and element.icon
         and TrialChatCommon.GetIconTexture(element.icon)
-    if isNearby(element.key) then
+    if whisper then
+        local classFile = TrialChatCommon.GetKnownClass(element.name)
+        row.avatar:SetPerson(element.name,
+            UI.ClassColor(classFile) or Color.textSoft, classFile)
+    elseif isNearby(element.key) then
         row.tile:SetLook(Color.tile, Color.textSoft, nil, "pin")
     elseif iconTexture then
         row.tile.box:SetColor(online and Color.tile or Color.tileOffline)
@@ -822,7 +930,7 @@ local function initConversationRow(row, element)
     UI.SetTextColor(row.name, isSelected and Color.white
         or online and Color.textSoft or Color.muted)
     row.name:ClearAllPoints()
-    row.name:SetPoint("LEFT", row.tile, "RIGHT", 10, 0)
+    row.name:SetPoint("LEFT", (whisper and row.avatar or row.tile), "RIGHT", 10, 0)
     if element.unread > 0 then
         row.badge:SetCount(element.unread)
         row.badge:Show()
@@ -868,7 +976,7 @@ local function updateLayout()
     addListenerField:SetShown(nearbyChat)
     memberList:ClearAllPoints()
     memberList:SetPoint("TOPLEFT", membersPanel, "TOPLEFT", 0, -10)
-    memberList:SetPoint("BOTTOMRIGHT", membersPanel, "BOTTOMRIGHT", 0, nearbyChat and 52 or 8)
+    memberList:SetPoint("BOTTOMRIGHT", membersPanel, "BOTTOMRIGHT", 0, nearbyChat and 52 or 18)
     UI.SetButtonActive(header.membersButton, membersShown)
     updateMembers()
 end
@@ -897,7 +1005,7 @@ local function setMembersShown(shown)
 end
 
 selectConversation = function(key)
-    if not isNearby(key) and not Groups:GetInfo(key) then
+    if not isNearby(key) and not isWhisper(key) and not Groups:GetInfo(key) then
         key = NEARBY
     end
     -- A reply answers a message in the conversation it came from.
@@ -909,14 +1017,29 @@ selectConversation = function(key)
     local firstUnread, unreadCount
     if isNearby(key) then
         Groups:SetViewedGroup(nil)
+        Whispers:SetViewed(nil)
         if nearbyUnread > 0 then
             firstUnread = math.max(1, #Nearby:GetHistory() - nearbyUnread + 1)
             unreadCount = nearbyUnread
         end
         nearbyUnread = 0
+    elseif isWhisper(key) then
+        Groups:SetViewedGroup(nil)
+        firstUnread, unreadCount = findFirstUnread(Whispers:GetHistory(key))
+        Whispers:SetViewed(isViewShown() and key or nil)
     else
+        Whispers:SetViewed(nil)
         firstUnread, unreadCount = findFirstUnread(Groups:GetHistory(key))
         Groups:SetViewedGroup(isViewShown() and key or nil)
+        -- Tell the creator once about members who left while others were offline.
+        if Groups:IsCreator(key) then
+            local leftNames = Groups:ConsumeLeftNotices(key)
+            if #leftNames > 0 then
+                local list = table.concat(leftNames, ", ")
+                showNotice(list .. " left " .. (Groups:GetInfo(key) and Groups:GetInfo(key).name or "the group")
+                    .. " while nobody else was online.")
+            end
+        end
     end
 
     if inMinimalMode() then
@@ -938,6 +1061,12 @@ local function onViewShown()
         if nearbyUnread > 0 then
             selectConversation(NEARBY)
         end
+    elseif isWhisper(selected) then
+        if findFirstUnread(Whispers:GetHistory(selected)) then
+            selectConversation(selected)
+        else
+            Whispers:SetViewed(selected)
+        end
     elseif findFirstUnread(Groups:GetHistory(selected)) then
         selectConversation(selected)
     else
@@ -950,6 +1079,8 @@ end
 local function getEntries()
     if isNearby(selected) then
         return Nearby:GetHistory(), formatNearbyMessage, colorForEntry
+    elseif isWhisper(selected) then
+        return Whispers:GetHistory(selected), formatGroupMessage, colorForEntry
     end
     return Groups:GetHistory(selected), formatGroupMessage, colorForEntry
 end
@@ -987,7 +1118,10 @@ local function ensureMinimal()
             if inMinimalMode() then onViewShown() end
         end,
         OnHidden = function()
-            if inMinimalMode() then Groups:SetViewedGroup(nil) end
+            if inMinimalMode() then
+                Groups:SetViewedGroup(nil)
+                Whispers:SetViewed(nil)
+            end
         end,
     })
     minimal:Refresh()
@@ -1027,6 +1161,14 @@ local function showToast(key, entry)
     end
     if isNearby(key) then
         minimal:ShowToast(key, "Nearby", nearbyUnread, entry, formatNearbyMessage, colorForEntry)
+        return
+    end
+    if isWhisper(key) then
+        local whisper = Whispers:GetInfo(key)
+        if not whisper or entry.read then return end
+        local _, unread = findFirstUnread(Whispers:GetHistory(key))
+        minimal:ShowToast(key, whisper.displayName or whisper.name, unread, entry,
+            formatGroupMessage, colorForEntry)
         return
     end
     local info = Groups:GetInfo(key)
@@ -1451,12 +1593,16 @@ local function createWindow()
     resizeGrip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
     resizeGrip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
     resizeGrip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
-    resizeGrip:SetScript("OnMouseDown", function()
-        window:StartSizing("BOTTOMRIGHT")
+    resizeGrip:SetScript("OnMouseDown", function(_, button)
+        if button == "LeftButton" then
+            window:StartSizing("BOTTOMRIGHT")
+        end
     end)
-    resizeGrip:SetScript("OnMouseUp", function()
-        window:StopMovingOrSizing()
-        saveWindowSettings()
+    resizeGrip:SetScript("OnMouseUp", function(_, button)
+        if button == "LeftButton" then
+            window:StopMovingOrSizing()
+            saveWindowSettings()
+        end
     end)
 
     -- Resizing the window while the emoji picker is up keeps the picker's
@@ -1581,11 +1727,60 @@ local function onGroupsChange(kind, id, entry, appended)
             scheduleRefresh("avatars", function() messageList:RefreshAvatars() end)
         end
     end
+    if kind == "memberremoved" then
+        local name, reason = entry, appended
+        -- If the creator is looking at this group right now, tell them
+        -- immediately; selecting the group again won't re-trigger the
+        -- on-view notice in selectConversation.
+        if name and reason ~= "kicked" and id == selected and isViewShown()
+            and Groups:IsCreator(id) then
+            local left = Groups:GetLeftMembersInfo(id)
+            local key = name and TrialChatCommon.NormalizeName(name)
+            if left and key and left[key] then
+                Groups:ClearLeftMember(id, name)
+                local info = Groups:GetInfo(id)
+                showNotice(("%s left %s while nobody else was online.")
+                    :format(name, info and info.name or "the group"))
+            end
+        end
+    end
+    scheduleRefresh("conversations", updateConversations)
+end
+
+local function onWhispersChange(kind, id, entry, appended)
+    if kind == "open" then
+        -- TrialChat opens on the whisper the player right-clicked.
+        Messenger:Open(false)
+        selectConversation(id)
+        if inMinimalMode() then
+            minimal:FocusInput()
+        else
+            composer.input:SetFocus()
+        end
+        return
+    end
+    if not window then return end
+
+    if kind == "message" and id == selected then
+        if appended then
+            appendMessage(entry, TrialChatCommon.IsSelf(entry.sender))
+            if isViewShown() then
+                noteMessage()
+            end
+        end
+    end
+    if kind == "message" and appended and (id ~= selected or not isViewShown()) then
+        showToast(id, entry)
+    end
+    if id == selected then
+        scheduleRefresh("header", updateHeader)
+    end
     scheduleRefresh("conversations", updateConversations)
 end
 
 Nearby:SetChangeHandler(onNearbyChange)
 Groups:SetChangeHandler(onGroupsChange)
+Whispers:SetChangeHandler(onWhispersChange)
 
 function Messenger:Open(focusInput)
     createWindow()

@@ -14,6 +14,7 @@ TrialChatSoundEmotes.lua
 TrialChatBubbles.lua
 TrialChat.lua
 TrialChatGroups.lua
+TrialChatWhispers.lua
 TrialChatUI.lua
 TrialChatIconNames.lua
 TrialChatIconPicker.lua

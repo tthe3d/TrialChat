@@ -70,8 +70,56 @@ local function hasMember(session, name)
     return findMemberKey(session, name) ~= nil
 end
 
+-- A known (offline) member: someone in the group's known list who isn't
+-- currently connected. The member list shows them under "Offline".
+local function isKnownMember(session, name)
+    if not session or not name or not session.knownMembers then return false end
+    local key = normalizeName(name)
+    if key and session.knownMembers[key] then return true end
+    for _, knownName in pairs(session.knownMembers) do
+        if namesMatch(knownName, name) then return true end
+    end
+    return false
+end
+
+-- A member of the group, online or a known offline member.
+local function isMember(session, name)
+    return hasMember(session, name) or isKnownMember(session, name)
+end
+
+-- Removed members are remembered so they can't simply reconnect and rejoin.
+local function isBanned(session, name)
+    if not session or not name or not session.banned then return false end
+    local key = normalizeName(name)
+    if key and session.banned[key] then return true end
+    for _, bannedName in pairs(session.banned) do
+        if namesMatch(bannedName, name) then return true end
+    end
+    return false
+end
+
+local function addBanned(session, name)
+    if not session or not name or name == "" or isSelf(name) then return end
+    session.banned = session.banned or {}
+    session.banned[normalizeName(name)] = name
+end
+
+local function unban(session, name)
+    if not session or not name or not session.banned then return end
+    local key = normalizeName(name)
+    if key then
+        session.banned[key] = nil
+    end
+    for bannedName, bannedValue in pairs(session.banned) do
+        if namesMatch(bannedValue, name) then
+            session.banned[bannedName] = nil
+        end
+    end
+end
+
 local persistGroup
 local sendHistoryToMember
+local getBannedList
 
 local function queueGroupSave(session)
     if not session or activeGroups[session.id] ~= session then return end
@@ -120,8 +168,66 @@ local function getUnreadCount(session)
     return count
 end
 
+local leftMembers = {} -- track members who left while not everyone was online
+
+function Groups:GetLeftMembersInfo(id)
+    return leftMembers[id]
+end
+
+-- Persist the pending "left while others were offline" notices so they survive
+-- a UI reload before the creator next opens the group.
+local function persistLeftMembers(id)
+    local saved = getSavedGroups()[id]
+    if not saved then return end
+    local list = {}
+    for _, info in pairs(leftMembers[id] or {}) do
+        list[#list + 1] = info.name
+    end
+    table.sort(list, function(a, b)
+        return normalizeName(a) < normalizeName(b)
+    end)
+    saved.leftMembers = #list > 0 and list or nil
+end
+
+local function restoreLeftMembers(id, savedGroup)
+    if type(savedGroup) ~= "table" or type(savedGroup.leftMembers) ~= "table" then
+        return
+    end
+    leftMembers[id] = leftMembers[id] or {}
+    for _, name in ipairs(savedGroup.leftMembers) do
+        if type(name) == "string" and name ~= "" then
+            local key = normalizeName(name)
+            if key and not leftMembers[id][key] then
+                leftMembers[id][key] = { name = name, time = 0 }
+            end
+        end
+    end
+end
+
+local function recordLeftMember(id, name)
+    if not id or not name then return end
+    leftMembers[id] = leftMembers[id] or {}
+    local key = normalizeName(name)
+    if key then
+        leftMembers[id][key] = { name = name, time = GetTime() }
+    end
+    persistLeftMembers(id)
+end
+
+local function clearLeftMember(id, name)
+    if not id or not name or not leftMembers[id] then return end
+    local key = normalizeName(name)
+    if key then
+        leftMembers[id][key] = nil
+        if next(leftMembers[id]) == nil then
+            leftMembers[id] = nil
+        end
+    end
+    persistLeftMembers(id)
+end
+
 local function addKnownMember(session, name)
-    if not name or name == "" or isSelf(name) then return end
+    if not name or name == "" or isSelf(name) or isBanned(session, name) then return end
     session.knownMembers = session.knownMembers or {}
     session.knownMembers[normalizeName(name)] = name
     session.reconnectName = name
@@ -130,7 +236,7 @@ end
 local getClassColor = TrialChatCommon.GetClassColor
 
 local function addMember(session, name, classFile)
-    if not name or name == "" then return end
+    if not name or name == "" or isBanned(session, name) then return end
 
     addKnownMember(session, name)
     local key = findMemberKey(session, name) or normalizeName(name)
@@ -142,6 +248,8 @@ local function addMember(session, name, classFile)
         lastSeen = GetTime(),
         classFile = classFile,
     }
+    -- If they were recorded as left, clear that record when they rejoin/are seen
+    clearLeftMember(session.id, name)
     if activeGroups[session.id] == session and saveGroup then
         saveGroup(session)
     end
@@ -150,13 +258,19 @@ local function addMember(session, name, classFile)
     end
 end
 
-local function removeMember(session, name)
+local function removeMember(session, name, reason)
     if not name or name == "" then return end
 
     local key = findMemberKey(session, name)
+    local wasMember = (key ~= nil)
     if key then session.members[key] = nil end
-    if key and session.reconnectName
-        and namesMatch(session.reconnectName, name) then
+    -- Also drop them from the known (offline-capable) list when they left for
+    -- good (explicit leave or kick), so they don't linger there. A timeout
+    -- just means they went quiet; keep them as a possible reconnection path.
+    if session.knownMembers and reason ~= "timeout" then
+        session.knownMembers[normalizeName(name)] = nil
+    end
+    if session.reconnectName and namesMatch(session.reconnectName, name) then
         local mostRecentMember
         for _, member in pairs(session.members) do
             if not isSelf(member.name)
@@ -166,14 +280,42 @@ local function removeMember(session, name)
         end
         if mostRecentMember then
             session.reconnectName = mostRecentMember.name
+        else
+            -- No one online: reconnect through another known member, if any.
+            session.reconnectName = nil
+            for _, knownName in pairs(session.knownMembers or {}) do
+                if not isSelf(knownName) then
+                    session.reconnectName = knownName
+                    break
+                end
+            end
+        end
+    end
+    -- If nobody else was around to see them go (except possibly you), note
+    -- that they left so the creator can be told next time they see this
+    -- person. A kick isn't a voluntary leave, so it isn't recorded.
+    if wasMember and reason ~= "kicked" and not isSelf(name) then
+        local now = GetTime()
+        local othersOnline = false
+        for _, member in pairs(session.members) do
+            if not isSelf(member.name)
+                and now - (member.lastSeen or 0) <= MEMBER_TIMEOUT then
+                othersOnline = true
+                break
+            end
+        end
+        if not othersOnline then
+            recordLeftMember(session.id, name)
         end
     end
     if activeGroups[session.id] == session and saveGroup then
         saveGroup(session)
     end
     if activeGroups[session.id] == session then
-        notifyChange("members", session.id)
+        notifyChange("members", session.id, name, reason)
+        notifyChange("memberremoved", session.id, name, reason)
     end
+    return wasMember
 end
 
 local function sendGroupProtocol(session, kind, target, body)
@@ -650,8 +792,34 @@ persistGroup = function(session)
         creatorName = session.creatorName,
         history = session.history or {},
         knownMembers = knownMembers,
+        banned = getBannedList(session),
         unreadTracking = true,
     }
+    persistLeftMembers(session.id)
+end
+
+-- The removed members, as a sorted list of names, for saving.
+getBannedList = function(session)
+    local list = {}
+    for _, name in pairs(session.banned or {}) do
+        list[#list + 1] = name
+    end
+    table.sort(list, function(left, right)
+        return normalizeName(left) < normalizeName(right)
+    end)
+    return #list > 0 and list or nil
+end
+
+local function getBanned(savedGroup)
+    local banned = {}
+    local savedBanned = type(savedGroup and savedGroup.banned) == "table"
+        and savedGroup.banned or {}
+    for _, name in ipairs(savedBanned) do
+        if type(name) == "string" and name ~= "" and not isSelf(name) then
+            banned[normalizeName(name)] = name
+        end
+    end
+    return banned
 end
 
 local function getKnownMembers(savedGroup)
@@ -778,6 +946,7 @@ local function joinGroup(name, password, targetName, savedGroup, autoJoin)
         muted = savedGroup and savedGroup.muted == true,
         autoJoin = autoJoin == true,
         knownMembers = getKnownMembers(savedGroup),
+        banned = getBanned(savedGroup),
         reconnectName = joinCandidates[1],
         joinCandidates = joinCandidates,
         hasSavedGroup = type(savedGroup) == "table",
@@ -786,6 +955,7 @@ local function joinGroup(name, password, targetName, savedGroup, autoJoin)
     if not (savedGroup and savedGroup.unreadTracking) then
         markGroupRead(session)
     end
+    restoreLeftMembers(id, savedGroup)
     pendingJoins[id] = session
     notifyChange("groups", id)
     startJoinAttempt(session, 1)
@@ -872,11 +1042,13 @@ createGroup = function(name, password, savedGroup, autoJoin, icon)
         muted = savedGroup and savedGroup.muted == true,
         autoJoin = autoJoin == true,
         knownMembers = getKnownMembers(savedGroup),
+        banned = getBanned(savedGroup),
         reconnectName = savedGroup and savedGroup.memberName,
     }
     if not (savedGroup and savedGroup.unreadTracking) then
         markGroupRead(session)
     end
+    restoreLeftMembers(id, savedGroup)
     activateGroup(session)
 end
 
@@ -1251,7 +1423,13 @@ end
 
 function Groups:IsCreator(id)
     local session = activeGroups[id]
-    if session then return session.isCreator == true end
+    if session then
+        if session.isCreator == true then return true end
+        -- Fall back to the creator name (e.g. a rejoin that didn't carry the
+        -- flag) so the creator is still recognised as the admin.
+        return session.creatorName ~= nil
+            and namesMatch(session.creatorName, selfName)
+    end
     return savedGroupIsCreator(getSavedGroups()[id])
 end
 
@@ -1301,6 +1479,27 @@ function Groups:GetMemberList(id)
     sortMembers(online)
     sortMembers(offline)
     return online, offline
+end
+
+function Groups:ClearLeftMember(id, name)
+    clearLeftMember(id, name)
+end
+
+-- Returns and clears the list of members who left while others were offline,
+-- so the creator can be told once when they next look at the group.
+function Groups:ConsumeLeftNotices(id)
+    local left = leftMembers[id]
+    if not left then return {} end
+    local result = {}
+    for _, info in pairs(left) do
+        result[#result + 1] = info.name
+    end
+    table.sort(result, function(a, b)
+        return normalizeName(a) < normalizeName(b)
+    end)
+    leftMembers[id] = nil
+    persistLeftMembers(id)
+    return result
 end
 
 function Groups:GetHistory(id)
@@ -1409,10 +1608,16 @@ function Groups:Invite(id, name)
         showNotice("Enter the name of the character to invite.")
         return
     end
-    if isSelf(name) or hasMember(session, name) then
+    if isSelf(name) or isMember(session, name) then
         showNotice((isSelf(name) and "You're" or (name .. " is"))
             .. " already in " .. session.name .. ".")
         return
+    end
+
+    -- Inviting someone clears any earlier removal, so they can join again.
+    if session.banned and next(session.banned) ~= nil then
+        unban(session, name)
+        if saveGroup then saveGroup(session) end
     end
 
     local _, index = findSentInvite(id, name)
@@ -1447,6 +1652,29 @@ function Groups:ShowInviteDialog(id)
     if not session then return end
     defineInviteDialog()
     StaticPopup_Show("TRIALCHAT_INVITE_PLAYER", session.name, nil, id)
+end
+
+-- Removes a member from a connected group (creator only), whether they are
+-- online or just a known offline member. Tells everyone, then removes them
+-- locally.
+function Groups:Kick(id, name)
+    local session = activeGroups[id]
+    if not session then return end
+    if not Groups:IsCreator(id) then
+        showNotice("Only the group creator can remove members.")
+        return
+    end
+    name = strtrim(name or "")
+    if name == "" or isSelf(name) then return end
+    if not isMember(session, name) then
+        showNotice(name .. " is not in " .. session.name .. ".")
+        return
+    end
+    addBanned(session, name)
+    sendToMembers(session, "BAN", name)
+    removeMember(session, name, "kicked")
+    if saveGroup then saveGroup(session) end
+    showNotice("Removed " .. name .. " from " .. session.name .. ".")
 end
 
 -- The invite waiting for your answer, as { groupName, inviter } (the
@@ -1553,7 +1781,8 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
     end
 
     if kind == "HELLO" then
-        if session and body == session.password then
+        -- Someone the creator removed can't just reconnect and rejoin.
+        if session and body == session.password and not isBanned(session, sender) then
             addMember(session, sender)
             sendGroupProtocol(session, "WELCOME", sender,
                 session.creatorName or (session.isCreator and selfName) or "")
@@ -1571,6 +1800,10 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
             end
             for _, memberName in pairs(session.knownMembers or {}) do
                 sendGroupProtocol(session, "KNOWN", sender, memberName)
+            end
+            -- Share the removed-member list so the newcomer rejects them too.
+            for _, bannedName in pairs(session.banned or {}) do
+                sendGroupProtocol(session, "BAN", sender, bannedName)
             end
             sendToMembers(session, "MEMBER", sender)
             if playerClass then
@@ -1661,6 +1894,41 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
     if kind == "BYE" then
         if session and hasMember(session, sender) then
             removeMember(session, sender)
+        end
+        return
+    end
+
+    -- A removed member: remembered so they can't rejoin, and dropped from the
+    -- member list. Members relay it (like ICON) so everyone knows.
+    if kind == "BAN" then
+        local target = body
+        if target and target ~= "" then
+            if session then
+                local savedGroup = getSavedGroups()[id]
+                local creatorName = session.creatorName
+                    or (savedGroup and savedGroup.creatorName)
+                local fromCreator = creatorName and namesMatch(sender, creatorName)
+                if (fromCreator or hasMember(session, sender))
+                    and not (creatorName and namesMatch(target, creatorName)) then
+                    if namesMatch(target, selfName or UnitName("player")) then
+                        -- You were removed
+                        showNotice("You were removed from " .. session.name .. ".")
+                        disconnectSession(id)
+                        pendingJoins[id] = nil
+                        pendingGroupSaves[id] = nil
+                        getSavedGroups()[id] = nil
+                        notifyChange("groups", id)
+                        return
+                    end
+                    addBanned(session, target)
+                    removeMember(session, target, "kicked")
+                    if saveGroup then saveGroup(session) end
+                    notifyChange("groups", id)
+                end
+            elseif pending and isJoinCandidate(pending, sender)
+                and not (pending.creatorName and namesMatch(target, pending.creatorName)) then
+                addBanned(pending, target)
+            end
         end
         return
     end
@@ -1801,16 +2069,16 @@ C_Timer.NewTicker(MEMBER_UPDATE_INTERVAL, function()
         for _, key in ipairs(expired) do
             local member = session.members[key]
             if member then
-                removeMember(session, member.name)
+                removeMember(session, member.name, "timeout")
             end
         end
     end
 end)
 
--- "Invite to TrialChat group" in the game's right-click menus for players
--- (unit frames, chat names, friends, guild and community lists), listing
--- the groups you're connected to. TrialChat's own member lists open the
--- chat name menu, so they have it too.
+-- "Invite to TrialChat group" and "Remove from TrialChat group" in the game's
+-- right-click menus for players (unit frames, chat names, friends, guild and
+-- community lists), listing the groups you're connected to. TrialChat's own
+-- member list builds its own menu with the same entries.
 local PLAYER_MENUS = {
     "PLAYER", "PARTY", "RAID_PLAYER", "RAID", "FOCUS", "FRIEND", "GUILD",
     "CHAT_ROSTER", "COMMUNITIES_WOW_MEMBER", "COMMUNITIES_GUILD_MEMBER",
@@ -1837,31 +2105,62 @@ local function getMenuPlayerName(contextData)
     return name
 end
 
-local function addInviteMenu(_, rootDescription, contextData)
-    local name = getMenuPlayerName(contextData)
-    if not name or isSelf(name) then return end
+-- Adds the "Invite to TrialChat group" and (for a group you created, when the
+-- player is a member) "Remove from TrialChat group" submenus to a player menu.
+-- Shared by the game's player menus and TrialChat's own member list.
+function Groups:AddPlayerMenu(rootDescription, name)
+    if not rootDescription or not name or isSelf(name) then return end
 
     local sessions = {}
+    local kickableSessions = {}
     for _, session in pairs(activeGroups) do
         sessions[#sessions + 1] = session
+        if Groups:IsCreator(session.id) and isMember(session, name) then
+            kickableSessions[#kickableSessions + 1] = session
+        end
     end
-    if #sessions == 0 then return end
+    if #sessions == 0 and #kickableSessions == 0 then return end
     table.sort(sessions, function(left, right)
         return strlower(left.name) < strlower(right.name)
     end)
+    table.sort(kickableSessions, function(left, right)
+        return strlower(left.name) < strlower(right.name)
+    end)
 
-    rootDescription:CreateDivider()
-    local inviteButton = rootDescription:CreateButton("Invite to TrialChat group")
-    for _, session in ipairs(sessions) do
-        local id = session.id
-        local groupButton = inviteButton:CreateButton(session.name, function()
-            Groups:Invite(id, name)
-        end)
-        -- Greyed out for groups they're already in.
-        if hasMember(session, name) then
-            groupButton:SetEnabled(false)
+    if #sessions > 0 then
+        rootDescription:CreateDivider()
+        local inviteButton = rootDescription:CreateButton("Invite to TrialChat group")
+        for _, session in ipairs(sessions) do
+            local id = session.id
+            local groupButton = inviteButton:CreateButton(session.name, function()
+                Groups:Invite(id, name)
+            end)
+            -- Greyed out for groups they're already in.
+            if isMember(session, name) then
+                groupButton:SetEnabled(false)
+            end
         end
     end
+
+    if #kickableSessions > 0 then
+        rootDescription:CreateDivider()
+        local removeButton = rootDescription:CreateButton("Remove from TrialChat group")
+        for _, session in ipairs(kickableSessions) do
+            local id = session.id
+            removeButton:CreateButton(session.name, function()
+                Groups:Kick(id, name)
+            end)
+        end
+    end
+end
+
+local function addInviteMenu(_, rootDescription, contextData)
+    local name = getMenuPlayerName(contextData)
+    if not name then return end
+    if TrialChatWhispers then
+        TrialChatWhispers:AddPlayerMenu(rootDescription, name)
+    end
+    Groups:AddPlayerMenu(rootDescription, name)
 end
 
 if Menu and Menu.ModifyMenu then
