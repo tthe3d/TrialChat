@@ -54,6 +54,46 @@ local function getGroupId(name)
     return normalizeName(name)
 end
 
+-- Which saved groups this character has chosen to join or not. The groups
+-- themselves are account-wide (TrialChatDB.groups), but whether a character
+-- is in one is theirs alone, kept in the per-character saved variable.
+local function getCharacterGroupState()
+    local characterDB = TrialChatCommon.GetCharacterDB()
+    local state = characterDB.groups
+    if type(state) ~= "table" then
+        state = {}
+        characterDB.groups = state
+    end
+    state.accepted = state.accepted or {}
+    state.declined = state.declined or {}
+    return state
+end
+
+-- What to do with a saved group when this character logs in: "join" (they're
+-- in it, or asked to be), "hidden" (they said no), or "prompt" (ask them).
+local function savedGroupMode(id, group)
+    local state = getCharacterGroupState()
+    if state.declined[id] then return "hidden" end
+    if state.accepted[id] or savedGroupIsCreator(group) then return "join" end
+    return "prompt"
+end
+
+-- Records that this character is in a group, so it reconnects next login
+-- and stops being offered to join.
+local function markGroupAccepted(id)
+    if not id then return end
+    local state = getCharacterGroupState()
+    state.declined[id] = nil
+    state.accepted[id] = true
+end
+
+local function markGroupDeclined(id)
+    if not id then return end
+    local state = getCharacterGroupState()
+    state.accepted[id] = nil
+    state.declined[id] = true
+end
+
 local function showNotice(message)
     print("|cffff7d0a[TrialChat Groups]|r " .. message)
 end
@@ -883,6 +923,9 @@ end
 local function activateGroup(session)
     pendingJoins[session.id] = nil
     activeGroups[session.id] = session
+    -- Connecting means this character is in the group, so it reconnects on
+    -- its next login without being asked.
+    markGroupAccepted(session.id)
     session.members = session.members or {}
     addMember(session, selfName or UnitName("player"))
     persistGroup(session)
@@ -1360,10 +1403,12 @@ local function countMembers(session)
 end
 
 -- Every group you're in or have saved, sorted by name. state is "online"
--- (connected), "connecting", or "offline" (saved, not connected).
+-- (connected), "connecting", or "offline" (saved, not connected). A saved
+-- group this character hasn't joined carries prompt = true instead of a
+-- member count, for the sidebar to ask whether to join it.
 function Groups:GetConversations()
     local conversations = {}
-    local function add(id, name, state, session, savedGroup)
+    local function add(id, name, state, session, savedGroup, prompt)
         conversations[#conversations + 1] = {
             id = id,
             name = name,
@@ -1372,6 +1417,7 @@ function Groups:GetConversations()
             online = session and countMembers(session) or 0,
             icon = (session and session.icon) or (savedGroup and savedGroup.icon),
             muted = (session and session.muted or savedGroup and savedGroup.muted) == true,
+            prompt = prompt or nil,
         }
     end
 
@@ -1386,7 +1432,10 @@ function Groups:GetConversations()
     end
     for id, group in pairs(savedGroups) do
         if not activeGroups[id] and not pendingJoins[id] and isValidSavedGroup(group) then
-            add(id, group.name, "offline", nil, group)
+            local mode = savedGroupMode(id, group)
+            if mode ~= "hidden" then
+                add(id, group.name, "offline", nil, group, mode == "prompt")
+            end
         end
     end
     table.sort(conversations, function(left, right)
@@ -1412,6 +1461,20 @@ function Groups:Connect(id)
     end
 end
 
+-- The player's answer to a saved group's join prompt in the sidebar. Joining
+-- connects to it; declining hides it from this character for good.
+function Groups:AnswerPrompt(id, join)
+    local group = getSavedGroups()[id]
+    if not isValidSavedGroup(group) then return end
+    if join then
+        markGroupAccepted(id)
+        Groups:Connect(id)
+    else
+        markGroupDeclined(id)
+    end
+    notifyChange("groups", id)
+end
+
 function Groups:GetInfo(id)
     local session = activeGroups[id]
     if not session then return nil end
@@ -1427,6 +1490,19 @@ function Groups:GetInfo(id)
         loadedHistory = session.historyLoad and session.historyLoad.added or 0,
         isCreator = session.isCreator == true,
     }
+end
+
+-- Whether a player is an online member of any group you're connected to.
+function Groups:IsOnline(name)
+    if not name or name == "" then return false end
+    for _, session in pairs(activeGroups) do
+        for _, member in pairs(session.members) do
+            if namesMatch(member.name, name) then
+                return true
+            end
+        end
+    end
+    return false
 end
 
 function Groups:IsCreator(id)
@@ -1735,7 +1811,10 @@ local function autoJoinSavedGroups()
     for _, entry in ipairs(groups) do
         local id = entry.id
         local group = entry.group
-        if not activeGroups[id] and not pendingJoins[id] then
+        -- Groups this character isn't in wait to be accepted in the sidebar
+        -- (Groups:AnswerPrompt); a refused group stays hidden.
+        if not activeGroups[id] and not pendingJoins[id]
+            and savedGroupMode(id, group) == "join" then
             local candidates = getJoinCandidates(group, group.memberName)
             if #candidates > 0 then
                 joinGroup(group.name, group.password, group.memberName,

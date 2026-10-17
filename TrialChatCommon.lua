@@ -61,6 +61,14 @@ function TrialChatCommon.NormalizeRealm(realm)
     return TrialChatCommon.NormalizeName((string.gsub(realm or "", "[%s']", "")))
 end
 
+-- Data that belongs to this character only, not the whole account: whispers
+-- and the saved groups they've chosen to join. It lives in
+-- TrialChatCharacterDB (see the .toc), which the game keeps per character.
+function TrialChatCommon.GetCharacterDB()
+    TrialChatCharacterDB = TrialChatCharacterDB or {}
+    return TrialChatCharacterDB
+end
+
 function TrialChatCommon.IsSelf(sender)
     if not sender or sender == "" then return false end
 

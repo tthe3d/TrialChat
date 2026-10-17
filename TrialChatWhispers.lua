@@ -11,10 +11,12 @@ local Whispers = TrialChatWhispers
 local normalizeName = TrialChatCommon.NormalizeName
 local shortName = TrialChatCommon.ShortName
 local isSelf = TrialChatCommon.IsSelf
+local namesMatch = TrialChatCommon.NamesMatch
 
--- One addon message carries 255 bytes and a longer one goes in parts, so this
--- limit is only here to keep a whisper the size the game's own whispers are.
-local MAX_MESSAGE_BYTES = 255
+-- One addon message carries 255 bytes and a longer one goes in parts, so a
+-- whisper is limited the same way the other TrialChat chats are, not by the
+-- game's own (much smaller) whisper limit.
+local MAX_MESSAGE_BYTES = 1000
 local MAX_HISTORY = 500
 local MAX_CONVERSATIONS = 60
 Whispers.MAX_MESSAGE_BYTES = MAX_MESSAGE_BYTES
@@ -27,6 +29,18 @@ local ADDON_PREFIX = "TrialChat"
 local WHISPER_TAG = "TCW1|"
 local WHISPER_PART_BYTES = 180
 local incomingParts = TrialChatCommon.NewPartCollector()
+
+-- A whisper conversation has no heartbeat the way a group does, so each side
+-- pings the other now and then and whoever answers keeps showing online. The
+-- window widens that with nearby activity and any group the two of you share.
+local WHISPER_PING = "PING|"
+local WHISPER_PONG = "PONG|"
+local PRESENCE_INTERVAL = 30
+local PRESENCE_TIMEOUT = 90
+local PRESENCE_SWEEP = 5
+local PRESENCE_PINGS_PER_SWEEP = 8
+local PONG_REPLY_INTERVAL = 15
+local lastPongAt = {}
 
 local PREFIX = "whisper:"
 
@@ -41,11 +55,18 @@ local function notifyChange(kind, id, ...)
 end
 
 local function getSavedWhispers()
-    TrialChatDB = TrialChatDB or {}
-    if type(TrialChatDB.whispers) ~= "table" then
-        TrialChatDB.whispers = {}
+    -- Whispers are per character: TrialChatCharacterDB is a per-character
+    -- saved variable, so logging in as someone else starts with their own list.
+    local characterDB = TrialChatCommon.GetCharacterDB()
+    -- Older versions kept every character's whispers together in TrialChatDB.
+    -- Drop that now the per-character store has taken over.
+    if TrialChatDB and TrialChatDB.whispers then
+        TrialChatDB.whispers = nil
     end
-    return TrialChatDB.whispers
+    if type(characterDB.whispers) ~= "table" then
+        characterDB.whispers = {}
+    end
+    return characterDB.whispers
 end
 
 local function ensureLoaded()
@@ -72,6 +93,19 @@ end
 
 local function getWhisperId(name)
     return PREFIX .. normalizeName(name)
+end
+
+-- The conversation for a name, matched the way names are matched elsewhere,
+-- so a ping that reports the realm a stored name left off still finds it.
+local function findConversation(name)
+    local conversation = conversations and conversations[getWhisperId(name)]
+    if conversation then return conversation end
+    for _, other in pairs(conversations or {}) do
+        if namesMatch(other.name, name) then
+            return other
+        end
+    end
+    return nil
 end
 
 function Whispers:IsWhisper(id)
@@ -145,14 +179,51 @@ local function addEntry(conversation, sender, message, isEmote, reply, fromSelf)
 end
 
 ---------------------------------------------------------------------------
+-- Presence
+---------------------------------------------------------------------------
+-- A conversation we've heard from within the timeout is online. This is only
+-- the ping half of it; the window adds nearby activity and shared groups.
+local function isSeenRecently(conversation)
+    local lastSeen = conversation and conversation.lastSeen
+    return lastSeen ~= nil and GetTime() - lastSeen <= PRESENCE_TIMEOUT
+end
+
+local function updatePresence(conversation)
+    local online = isSeenRecently(conversation)
+    if conversation.presenceSeen ~= online then
+        conversation.presenceSeen = online
+        notifyChange("presence", conversation.id)
+    end
+end
+
+-- Heard from a player, so they're online. Does nothing when we have no
+-- conversation with them (a ping from a stranger, say).
+local function noteSeen(name)
+    ensureLoaded()
+    local conversation = findConversation(name)
+    if not conversation then return end
+    conversation.lastSeen = GetTime()
+    updatePresence(conversation)
+end
+
+---------------------------------------------------------------------------
 -- Sending
 ---------------------------------------------------------------------------
 -- Whispers go out as addon messages addressed to the conversation's player,
 -- so they reach them the same way nearby chat does, with no game whisper the
 -- game would refuse on a trial account.
-local function sendPacket(conversation, payload)
+local function sendPacketTo(name, payload)
     C_ChatInfo.SendAddonMessage(ADDON_PREFIX, WHISPER_TAG .. payload,
-        "WHISPER", conversation.name)
+        "WHISPER", name)
+end
+
+local function sendPacket(conversation, payload)
+    sendPacketTo(conversation.name, payload)
+end
+
+local function pingConversation(conversation)
+    conversation.lastPingAt = GetTime()
+    sendPacket(conversation, WHISPER_PING)
 end
 
 -- A reply quote and emoji markup can make a message outgrow one addon
@@ -209,10 +280,50 @@ function Whispers:SendMessage(id, message, reply)
                 TrialChatCommon.AddOwnSongLinkOwner(message)))
 end
 
+-- Keeps presence going. Conversations overdue for a ping get one (a few at a
+-- time, so a long list doesn't burst out at once), and a player who stops
+-- answering drops offline once their last answer ages past the timeout.
+C_Timer.NewTicker(PRESENCE_SWEEP, function()
+    ensureLoaded()
+    local now = GetTime()
+    local pingsLeft = PRESENCE_PINGS_PER_SWEEP
+    for _, conversation in pairs(conversations) do
+        if pingsLeft > 0
+            and now - (conversation.lastPingAt or 0) >= PRESENCE_INTERVAL then
+            pingConversation(conversation)
+            pingsLeft = pingsLeft - 1
+        end
+        updatePresence(conversation)
+    end
+    for key, at in pairs(lastPongAt) do
+        if now - at >= PONG_REPLY_INTERVAL * 4 then
+            lastPongAt[key] = nil
+        end
+    end
+end)
+
 ---------------------------------------------------------------------------
 -- Receiving
 ---------------------------------------------------------------------------
 local function onAddonWhisper(sender, kind, body)
+    -- Presence: a ping is answered, and an answer proves the other side is
+    -- online. A ping from someone we have no conversation with is answered
+    -- too, so their side learns we're here, but leaves no conversation behind.
+    if kind == "PING" then
+        noteSeen(sender)
+        local key = normalizeName(sender)
+        local now = GetTime()
+        if not lastPongAt[key] or now - lastPongAt[key] >= PONG_REPLY_INTERVAL then
+            lastPongAt[key] = now
+            sendPacketTo(sender, WHISPER_PONG)
+        end
+        return
+    end
+    if kind == "PONG" then
+        noteSeen(sender)
+        return
+    end
+
     if kind == "PART" then
         local partKind, partId, index, count, chunk =
             string.match(body, "^(%a+):([%x%-]+):(%d+):(%d+):(.*)$")
@@ -234,6 +345,9 @@ local function onAddonWhisper(sender, kind, body)
     end
 
     local conversation = ensureConversation(sender)
+    -- A whisper that reached us is proof they're online.
+    conversation.lastSeen = GetTime()
+    updatePresence(conversation)
     -- The game plays its tell sound for a normal whisper; an addon message
     -- has to make its own, and only when the conversation isn't being read.
     if viewedId ~= conversation.id then
@@ -274,7 +388,7 @@ function Whispers:GetConversations()
         list[#list + 1] = {
             id = id,
             name = conversation.name,
-            state = "online",
+            state = isSeenRecently(conversation) and "online" or "offline",
             unread = countUnread(conversation),
             meta = shortName(conversation.name),
             timestamp = last and tonumber(last.timestamp) or 0,
@@ -300,6 +414,13 @@ function Whispers:GetInfo(id)
         displayName = shortName(conversation.name),
         unread = countUnread(conversation),
     }
+end
+
+-- Whether the other player's presence ping has been answered recently. The
+-- window widens this with nearby activity and any group the two of you share.
+function Whispers:IsOnline(id)
+    ensureLoaded()
+    return isSeenRecently(conversations[id])
 end
 
 function Whispers:GetHistory(id)
@@ -334,6 +455,8 @@ function Whispers:OpenConversation(name)
     if not name or name == "" then return nil end
     local conversation = ensureConversation(name)
     saveConversation(conversation)
+    -- Ask right away whether they're around, rather than waiting a sweep.
+    pingConversation(conversation)
     notifyChange("open", conversation.id)
     return conversation.id
 end

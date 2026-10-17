@@ -4,6 +4,7 @@
 ## Author: AI Peer
 ## Version: 3.5
 ## SavedVariables: TrialChatDB
+## SavedVariablesPerCharacter: TrialChatCharacterDB
 ## IconTexture: Interface\AddOns\TrialChat\broke
 
 TrialChatCommon.lua

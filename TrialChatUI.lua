@@ -40,10 +40,13 @@ UI.Color = {
     accent = hexColor("e8b33f"),
     accentHover = hexColor("f0c25a"),
     accentText = hexColor("1a1405"),
+    accentFaint = hexColor("3a2f14"),
     online = hexColor("5ccf7a"),
     offline = hexColor("5d636b"),
     emote = hexColor("ff7d0a"),
     error = hexColor("ff5c5c"),
+    errorFaint = hexColor("3a1d1d"),
+    errorText = hexColor("1a0a0a"),
     avatar = hexColor("13171c"),
     tile = hexColor("1f2329"),
     tileOffline = hexColor("1a1d22"),
@@ -536,6 +539,16 @@ local BUTTON_STYLES = {
     accent = { fill = "accent", hover = "accentHover", content = "accentText" },
     -- A dashed outline, for adding things.
     dashed = { hover = "hover", content = "textSoft" },
+    -- A faint gold that fills in and brightens on hover, for accepting.
+    accept = {
+        fill = "accentFaint", hover = "accent", content = "accent",
+        hoverContent = "accentText", border = "accent", borderAlpha = 0.45,
+    },
+    -- A faint red that fills in and brightens on hover, for declining.
+    decline = {
+        fill = "errorFaint", hover = "error", content = "error",
+        hoverContent = "errorText", border = "error", borderAlpha = 0.45,
+    },
     -- See-through dark with a faint outline, for buttons over the game world.
     hud = {
         fill = "sidebar", hover = "selected", fillAlpha = 0.8,
@@ -606,18 +619,31 @@ local function layoutButtonContent(button)
     end
 end
 
-local function setButtonText(button, text)
-    button.label:SetText(text)
-    layoutButtonContent(button)
+local function resolveButtonTooltip(button)
+    local tooltip = button.tooltip
+    if type(tooltip) == "function" then tooltip = tooltip(button) end
+    return tooltip
 end
 
 local function showButtonTooltip(button)
-    local tooltip = button.tooltip
-    if type(tooltip) == "function" then tooltip = tooltip(button) end
-    if not tooltip then return end
+    local text = resolveButtonTooltip(button)
+    if not text then return end
     GameTooltip:SetOwner(button, button.tooltipAnchor or "ANCHOR_TOP")
-    GameTooltip:SetText(tooltip, nil, nil, nil, nil, true)
+    GameTooltip:SetText(text, nil, nil, nil, nil, true)
     GameTooltip:Show()
+end
+
+local function showThemedButtonTooltip(button)
+    local text = resolveButtonTooltip(button)
+    if not text then return end
+    UI.ShowTooltip(button, text)
+end
+
+local function setButtonText(button, text)
+    if button.label then
+        button.label:SetText(text)
+    end
+    layoutButtonContent(button)
 end
 
 -- options: style, width, height, radius, icon, iconSize, text, centered
@@ -643,6 +669,7 @@ function UI.CreateButton(parent, options)
     end
     button.centered = options.centered
     button.autoWidth = options.width == nil
+    button.themedTooltip = options.themedTooltip
     button.tooltip = options.tooltip
     button.SetLabel = setButtonText
     layoutButtonContent(button)
@@ -654,13 +681,24 @@ function UI.CreateButton(parent, options)
     button:SetScript("OnEnter", function(self)
         self.hovered = true
         UI.UpdateButton(self)
-        showButtonTooltip(self)
+        if self.themedTooltip then
+            showThemedButtonTooltip(self)
+        else
+            showButtonTooltip(self)
+        end
     end)
     button:SetScript("OnLeave", function(self)
         self.hovered = false
         UI.UpdateButton(self)
-        GameTooltip_Hide()
+        if self.themedTooltip then
+            UI.HideTooltip()
+        else
+            GameTooltip_Hide()
+        end
     end)
+    if options.themedTooltip then
+        button:HookScript("OnHide", UI.HideTooltip)
+    end
     button:SetScript("OnEnable", UI.UpdateButton)
     button:SetScript("OnDisable", UI.UpdateButton)
     UI.UpdateButton(button)
@@ -770,9 +808,39 @@ function UI.CreateInviteCard(parent, onAnswer)
 end
 
 ---------------------------------------------------------------------------
--- Popup menus: the small list that opens where you click, like the menu a
--- right-clicked message brings up. The view that opens one hands in its
--- colors, so the menu matches the window or the minimal view it came from.
+-- Tooltips: a small themed box, like the popup menu, shown for button hints.
+---------------------------------------------------------------------------
+local TOOLTIP_INSET = 10
+local tooltip
+
+function UI.HideTooltip()
+    if tooltip then tooltip:Hide() end
+end
+
+-- Shows text near the owner, to the right by default. The frame is clamped
+-- to the screen.
+function UI.ShowTooltip(owner, text)
+    if not text or text == "" then UI.HideTooltip(); return end
+    if not tooltip then
+        local frame = CreateFrame("Frame", "TrialChatTooltip", UIParent)
+        frame:SetFrameStrata("TOOLTIP")
+        frame:SetClampedToScreen(true)
+        frame.box = UI.CreateBox(frame, { radius = 8, border = true })
+        frame.box:SetColor(Color.window, 0.98)
+        frame.box:SetBorderColor(Color.outline, 1)
+        frame.text = UI.CreateText(frame, UI.Font.item, Color.textSoft)
+        frame.text:SetPoint("LEFT", frame, "LEFT", TOOLTIP_INSET, 0)
+        frame.text:SetPoint("RIGHT", frame, "RIGHT", -TOOLTIP_INSET, 0)
+        frame.text:SetWordWrap(false)
+        tooltip = frame
+    end
+    tooltip.text:SetText(text)
+    tooltip:SetSize(math.ceil(tooltip.text:GetStringWidth()) + 2 * TOOLTIP_INSET, 26)
+    tooltip:ClearAllPoints()
+    tooltip:SetPoint("BOTTOM", owner, "TOP", 0, 6)
+    tooltip:Show()
+end
+
 ---------------------------------------------------------------------------
 local POPUP_NAME = "TrialChatPopupMenu"
 local POPUP_LEVEL = 4999

@@ -517,6 +517,16 @@ end
 ---------------------------------------------------------------------------
 -- Members
 ---------------------------------------------------------------------------
+-- Whether the other player in a whisper counts as online. A whisper has no
+-- heartbeat, so we go by the presence ping they answer, an active listener
+-- nearby, or an online member of a group the two of you share.
+local function whisperPartnerOnline(whisper)
+    if not whisper then return false end
+    if Whispers:IsOnline(whisper.id) then return true end
+    if Nearby:IsActive(whisper.name) then return true end
+    return Groups:IsOnline(whisper.name)
+end
+
 local function updateMembers()
     if not membersPanel:IsShown() then return end
 
@@ -554,11 +564,12 @@ local function updateMembers()
             end
         end
     elseif isWhisper(selected) then
-        -- A whisper is only ever the two of you. The game tells us nothing
-        -- about the other player's presence, so they are shown the way the
-        -- sidebar already shows their conversation: as someone you can talk
-        -- to, with their class color once it's known.
+        -- A whisper is only ever the two of you. The other player is shown
+        -- online when we can actually tell: they answered the presence ping,
+        -- they're an active listener nearby, or they're online in a group the
+        -- two of you share. Otherwise they show offline.
         local whisper = Whispers:GetInfo(selected)
+        local partnerOnline = whisperPartnerOnline(whisper)
         local people = {
             { fullName = TrialChatCommon.GetPlayerFullName(), isSelf = true,
                 classFile = TrialChatCommon.GetPlayerClass() },
@@ -572,7 +583,7 @@ local function updateMembers()
         addLabel("Whisper - " .. #people)
         for _, person in ipairs(people) do
             local nearbyTag = not person.isSelf and Nearby:IsActive(person.fullName)
-            addMember(person, true, nearbyTag and "nearby")
+            addMember(person, person.isSelf or partnerOnline, nearbyTag and "nearby")
         end
     else
         local online, offline = Groups:GetMemberList(selected)
@@ -658,7 +669,7 @@ end
 
 local function onMemberLeave(row)
     row.hover:Hide()
-    GameTooltip_Hide()
+    UI.HideTooltip()
 end
 
 local function initMemberLabel(frame, element)
@@ -735,6 +746,7 @@ local function updateConversations()
                 unread = conversation.unread,
                 muted = conversation.muted,
                 icon = conversation.icon,
+                prompt = conversation.prompt,
                 meta = state == "online" and (conversation.online .. " online")
                     or state == "connecting" and "connecting..." or "offline",
             }
@@ -742,10 +754,11 @@ local function updateConversations()
     end
     for _, conversation in ipairs(Whispers:GetConversations()) do
         if matches(conversation.name) then
+            local online = whisperPartnerOnline(conversation)
             elements[#elements + 1] = {
                 key = conversation.id,
                 name = conversation.name,
-                state = "online",
+                state = online and "online" or "offline",
                 unread = conversation.unread,
                 meta = "Whisper",
             }
@@ -841,6 +854,9 @@ local function onConversationClick(row, button)
     if not element then return end
     if button == "RightButton" then
         showConversationMenu(row, element)
+    elseif element.prompt then
+        -- Join prompts are answered with the row's own buttons, not by
+        -- clicking the row.
     elseif element.state == "offline" then
         Groups:Connect(element.key)
     elseif element.state == "online" then
@@ -857,7 +873,7 @@ local function onConversationEnter(row)
     row.hovered = true
     updateConversationRowHover(row)
     local element = row.element
-    if element and element.state == "offline" then
+    if element and element.state == "offline" and not element.prompt then
         GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
         GameTooltip:SetText("Click to connect to " .. element.name .. ".")
         GameTooltip:AddLine("Right-click for more options.", 1, 1, 1)
@@ -868,7 +884,15 @@ end
 local function onConversationLeave(row)
     row.hovered = false
     updateConversationRowHover(row)
-    GameTooltip_Hide()
+    UI.HideTooltip()
+end
+
+-- The two small buttons a saved group this character hasn't joined shows
+-- instead of a member count: accept (check) first, then decline (cross).
+local function answerGroupPrompt(row, join)
+    local element = row.element
+    if not element or not element.prompt then return end
+    Groups:AnswerPrompt(element.key, join)
 end
 
 local function initConversationRow(row, element)
@@ -888,6 +912,22 @@ local function initConversationRow(row, element)
         row.badge:SetPoint("RIGHT", row, "RIGHT", -10, 0)
         row.meta = UI.CreateText(row, UI.Font.small, Color.muted)
         row.meta:SetPoint("RIGHT", row, "RIGHT", -10, 0)
+        row.accept = UI.CreateButton(row, {
+            style = "accept", icon = "check", iconSize = 14,
+            width = 24, height = 22,
+            tooltip = "Accept", themedTooltip = true,
+            onClick = function() answerGroupPrompt(row, true) end,
+        })
+        row.deny = UI.CreateButton(row, {
+            style = "decline", icon = "close", iconSize = 13,
+            width = 24, height = 22,
+            tooltip = "Decline", themedTooltip = true,
+            onClick = function() answerGroupPrompt(row, false) end,
+        })
+        row.deny:SetPoint("RIGHT", row, "RIGHT", -8, 0)
+        row.accept:SetPoint("RIGHT", row.deny, "LEFT", -6, 0)
+        row.accept:Hide()
+        row.deny:Hide()
         row.name = UI.CreateText(row, UI.Font.item)
         row.name:SetPoint("LEFT", row.tile, "RIGHT", 10, 0)
         row.name:SetJustifyH("LEFT")
@@ -931,16 +971,26 @@ local function initConversationRow(row, element)
         or online and Color.textSoft or Color.muted)
     row.name:ClearAllPoints()
     row.name:SetPoint("LEFT", (whisper and row.avatar or row.tile), "RIGHT", 10, 0)
-    if element.unread > 0 then
-        row.badge:SetCount(element.unread)
-        row.badge:Show()
-        row.meta:Hide()
-        row.name:SetPoint("RIGHT", row.badge, "LEFT", -6, 0)
-    else
+    if element.prompt then
         row.badge:Hide()
-        row.meta:SetText(element.meta)
-        row.meta:Show()
-        row.name:SetPoint("RIGHT", row.meta, "LEFT", -6, 0)
+        row.meta:Hide()
+        row.accept:Show()
+        row.deny:Show()
+        row.name:SetPoint("RIGHT", row.accept, "LEFT", -8, 0)
+    else
+        row.accept:Hide()
+        row.deny:Hide()
+        if element.unread > 0 then
+            row.badge:SetCount(element.unread)
+            row.badge:Show()
+            row.meta:Hide()
+            row.name:SetPoint("RIGHT", row.badge, "LEFT", -6, 0)
+        else
+            row.badge:Hide()
+            row.meta:SetText(element.meta)
+            row.meta:Show()
+            row.name:SetPoint("RIGHT", row.meta, "LEFT", -6, 0)
+        end
     end
 end
 
@@ -1775,6 +1825,9 @@ local function onWhispersChange(kind, id, entry, appended)
     end
     if id == selected then
         scheduleRefresh("header", updateHeader)
+        if kind == "presence" then
+            scheduleRefresh("members", updateMembers)
+        end
     end
     scheduleRefresh("conversations", updateConversations)
 end
