@@ -224,6 +224,24 @@ local function isWordChar(char)
     return char ~= nil and char ~= "" and string.find(char, "[%w]") ~= nil
 end
 
+-- Whether an emoticon shortcut starts right at a position, whatever stands
+-- around it. Tells an emoticon that sits inside a word ("hi:P") from one that
+-- is simply followed by another emoticon ("8-|8-|"), where the next character
+-- is a word character but starts a picture of its own.
+local function emojiStartsAt(text, position, length)
+    if position > length then return false end
+    local char = string.sub(text, position, position)
+    local candidates = TrialChatCommon.EmojiByFirstChar[char]
+    if not candidates then return false end
+    for index = 1, #candidates do
+        local shortcut = candidates[index].shortcut
+        if string.sub(text, position, position + #shortcut - 1) == shortcut then
+            return true
+        end
+    end
+    return false
+end
+
 -- Replaces every emoticon shortcut in a message with the picture it stands
 -- for. Run before FormatMessageText, which lets the pictures through.
 function TrialChatCommon.ApplyEmojiMarkup(text)
@@ -249,11 +267,13 @@ function TrialChatCommon.ApplyEmojiMarkup(text)
                     == shortcut then
                     local before = position > 1
                         and string.sub(text, position - 1, position - 1) or nil
-                    local after = position + shortcutLength <= length
-                        and string.sub(text, position + shortcutLength,
-                            position + shortcutLength) or nil
+                    local afterPosition = position + shortcutLength
+                    local after = afterPosition <= length
+                        and string.sub(text, afterPosition, afterPosition) or nil
+                    local afterStartsEmoji =
+                        emojiStartsAt(text, afterPosition, length)
                     if not (isWordChar(before) and not previousWasEmoji)
-                        and not isWordChar(after) then
+                        and not (isWordChar(after) and not afterStartsEmoji) then
                         -- Two pictures with nothing between them
                         -- ("|T...|t|T...|t") don't both draw in a font string,
                         -- so put a space in front of one that follows text or
