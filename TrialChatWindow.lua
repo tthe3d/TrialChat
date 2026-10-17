@@ -135,8 +135,12 @@ local function updateAlpha()
         or (addListenerField and addListenerField:HasFocus())
     local recentMessage = lastMessageAt
         and GetTime() - lastMessageAt < MESSAGE_VISIBLE_SECONDS
+    -- The emoji picker is part of using the window: it stays lit while the
+    -- picker is up, even if moving it around steals the keyboard focus.
+    local pickerOpen = TrialChatEmojiPicker and TrialChatEmojiPicker.IsShown
+        and TrialChatEmojiPicker.IsShown()
     local visible = (window:IsShown() and window:IsMouseOver()) or focused or recentMessage
-        or (inviteCard and inviteCard:IsShown())
+        or (inviteCard and inviteCard:IsShown()) or pickerOpen
     TrialChatCommon.FadeTo(window, visible and 1 or IDLE_ALPHA)
 end
 
@@ -430,59 +434,53 @@ local function sendWithReply(message)
     sendToConversation(message, takePendingReply())
 end
 
--- The list of every emote, picked from the picker's "All emotes" button.
-local function showAllEmotes(owner)
-    MenuUtil.CreateContextMenu(owner, function(_, root)
-        root:CreateTitle("All emotes")
-        if root.SetScrollMode then root:SetScrollMode(400) end
-        local names = {}
-        for emote in pairs(TrialChatCommon.EmoteDescriptions or {}) do
-            names[#names + 1] = emote
-        end
-        table.sort(names)
-        for _, emote in ipairs(names) do
-            root:CreateButton("/" .. emote, function()
-                sendToConversation("/" .. emote)
-            end)
-        end
-    end)
-end
-
--- The list of sound emotes, picked from the picker's "Sound emotes" button.
-local function showSoundEmotes(owner)
-    local soundEmotes = {}
-    for emote in pairs(TrialChatCommon.SoundEmotes or {}) do
-        soundEmotes[#soundEmotes + 1] = emote
-    end
-    table.sort(soundEmotes)
-    MenuUtil.CreateContextMenu(owner, function(_, root)
-        root:CreateTitle("Sound emotes")
-        if root.SetScrollMode then root:SetScrollMode(400) end
-        for _, emote in ipairs(soundEmotes) do
-            root:CreateButton("//" .. emote, function()
-                sendToConversation("//" .. emote)
-            end)
-        end
-    end)
-end
-
 -- The smiley button opens the emoji grid; picking one drops its shortcut into
--- the message box. The emote lists and "make your own" sit under the grid.
-local function showEmoteMenu(owner)
+-- the message box. The emote lists open beside the grid and "make your own"
+-- sits under it.
+-- The picker's catcher sits beneath the window rather than over it, so the
+-- window stays interactive while the picker is up: it can be dragged or resized
+-- without the picker closing, and using any of its buttons or fields closes the
+-- picker (see watchOutsideClick in TrialChatEmojiPicker).
+local function showEmoteMenu()
+    -- Clicking the smiley again while the grid is up closes it, the way a
+    -- toggle should, and hands writing straight back to the message box.
+    if TrialChatEmojiPicker.IsShown() then
+        TrialChatEmojiPicker.Hide()
+        if composer.input then composer.input:SetFocus() end
+        updateAlpha()
+        return
+    end
+    -- Put the cursor in the message box as the picker opens, so the window
+    -- stays lit (it fades while nothing is focused) and typing can start right
+    -- away. Clicking an emoji drops it in at the cursor.
+    if composer.input then
+        composer.input:SetFocus()
+        updateAlpha()
+    end
     TrialChatEmojiPicker.Show({
+        input = composer.input,
+        anchor = composer.emoteButton,
+        window = window,
+        onClose = function()
+            updateAlpha()
+        end,
         onPick = function(entry)
             local input = composer.input
             if not input then return end
-            -- Dropped at the cursor when typing, or at the end of whatever is
-            -- already there when the box isn't in focus.
-            if not input:HasFocus() then
+            -- The picker holds the keyboard on the message box, so the emoji
+            -- drops in at the caret. Only when the box isn't focused for some
+            -- reason does it go on the end, as before.
+            if input:HasFocus() then
+                input:Insert(entry.shortcut)
+            else
                 input:SetCursorPosition(#(input:GetText() or ""))
+                input:Insert(entry.shortcut)
+                input:SetFocus()
             end
-            input:Insert(entry.shortcut)
-            input:SetFocus()
         end,
-        onAllEmotes = function() showAllEmotes(owner) end,
-        onSoundEmotes = function() showSoundEmotes(owner) end,
+        onEmote = function(name, isSound)
+            sendToConversation((isSound and "//" or "/") .. name)
+        end,
         onWriteOwn = function()
             local input = composer.input
             if not input then return end
@@ -1206,12 +1204,6 @@ local function createHeader()
 end
 
 local function createComposer()
-    local emoteButton = UI.CreateButton(main, {
-        icon = "smile", iconSize = 18, width = 36, height = 36, tooltip = "Emotes",
-        onClick = function(self) showEmoteMenu(self) end,
-    })
-    emoteButton:SetPoint("BOTTOMLEFT", main, "BOTTOMLEFT", 20, 14)
-
     local sendButton = UI.CreateButton(main, {
         style = "accent", icon = "send", iconSize = 16, width = 36, height = 36,
         tooltip = "Send",
@@ -1222,15 +1214,55 @@ local function createComposer()
     composer.counter = UI.CreateText(main, UI.Font.small, Color.muted)
     composer.counter:SetPoint("RIGHT", sendButton, "LEFT", -10, 0)
 
+    -- The smiley sits at the right end of the message box rather than the left,
+    -- so the emoji window it opens pops out to the right of the chat and leaves
+    -- the incoming messages on the left readable while it is up.
+    local emoteButton = UI.CreateButton(main, {
+        icon = "smile", iconSize = 18, width = 36, height = 36, tooltip = "Emotes",
+        onClick = function() showEmoteMenu() end,
+    })
+    emoteButton:SetPoint("RIGHT", composer.counter, "LEFT", -10, 0)
+    composer.emoteButton = emoteButton
+
     local input = UI.CreateField(main, { height = 36 })
     composer.input = input
-    input:SetPoint("LEFT", emoteButton, "RIGHT", 8, 0)
-    input:SetPoint("RIGHT", composer.counter, "LEFT", -10, 0)
+    input:SetPoint("BOTTOMLEFT", main, "BOTTOMLEFT", 20, 14)
+    input:SetPoint("BOTTOMRIGHT", emoteButton, "BOTTOMLEFT", -8, 0)
     TrialChatCommon.RegisterLinkInput(input)
     input:SetScript("OnEnterPressed", sendComposerMessage)
+    -- Escape with the emoji picker up closes just the picker and keeps the
+    -- message box focused, so writing carries on; otherwise it leaves the box
+    -- like a normal field.
+    input:SetScript("OnEscapePressed", function(self)
+        if TrialChatEmojiPicker.IsShown() then
+            TrialChatEmojiPicker.Hide()
+            self:SetFocus()
+            return
+        end
+        self:ClearFocus()
+    end)
     input:HookScript("OnTextChanged", updateCounter)
     input:HookScript("OnEditFocusGained", updateAlpha)
-    input:HookScript("OnEditFocusLost", updateAlpha)
+    input:HookScript("OnEditFocusLost", function()
+        -- Remember where the caret was, so handing the keyboard back below
+        -- puts it back instead of dropping it at the end of the message.
+        local caret = input:GetCursorPosition()
+        updateAlpha()
+        -- Clicking the emoji picker's own empty space shouldn't stop writing:
+        -- while the picker is up, hand the keyboard straight back to the
+        -- message box -- unless another box (the window's search, say) has
+        -- deliberately taken it.
+        C_Timer.After(0, function()
+            if TrialChatEmojiPicker.IsShown()
+                and not TrialChatEmojiPicker.IsSearchFocused()
+                and not input:HasFocus()
+                and not (GetCurrentKeyBoardFocus
+                    and GetCurrentKeyBoardFocus()) then
+                input:SetFocus()
+                if caret then input:SetCursorPosition(caret) end
+            end
+        end)
+    end)
 
     -- The reply strip sits between the messages and the message box.
     replyBar = CreateFrame("Frame", nil, main)
@@ -1382,7 +1414,9 @@ local function createWindow()
     end
     window:EnableMouse(true)
     window:RegisterForDrag("LeftButton")
-    window:SetScript("OnDragStart", window.StartMoving)
+    window:SetScript("OnDragStart", function(self)
+        self:StartMoving()
+    end)
     window:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         saveWindowSettings()
@@ -1425,11 +1459,22 @@ local function createWindow()
         saveWindowSettings()
     end)
 
+    -- Resizing the window while the emoji picker is up keeps the picker's
+    -- proportions in step with it instead of leaving the panel at its old size.
+    window:HookScript("OnSizeChanged", function()
+        if TrialChatEmojiPicker.IsShown() then
+            TrialChatEmojiPicker.RefreshScale()
+        end
+    end)
+
     window:HookScript("OnEnter", updateAlpha)
     window:HookScript("OnLeave", updateAlpha)
     TrialChatCommon.WatchHover(window, updateAlpha)
     window:SetScript("OnShow", onViewShown)
     window:SetScript("OnHide", function()
+        -- The picker is anchored to a button in the window, so it can't outlive
+        -- it: closing or minimizing the chat puts the picker away too.
+        if TrialChatEmojiPicker.IsShown() then TrialChatEmojiPicker.Hide() end
         Groups:SetViewedGroup(nil)
         composer.input:ClearFocus()
         searchField:ClearFocus()
