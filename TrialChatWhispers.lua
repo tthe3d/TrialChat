@@ -1,10 +1,10 @@
 -- One-on-one whisper conversations, alongside nearby chat and your groups.
--- A whisper uses the game's own whisper chat ("WHISPER"), so it reaches the
--- other player in the normal chat whether or not they run TrialChat. This
--- module only keeps a per-player history, an unread count and the window's
--- list entry, so the conversation shows in the sidebar with the player's
--- portrait. Group messages never land here: they travel as addon messages,
--- which never fire CHAT_MSG_WHISPER.
+-- A whisper travels as an addon message, never as a game whisper: a trial
+-- account can't whisper a player it isn't grouped with, and those are exactly
+-- the players this addon exists to reach. The price is that only TrialChat
+-- players read a whisper, the same as nearby chat and group messages. This
+-- module keeps a per-player history, an unread count and the window's list
+-- entry, so the conversation shows in the sidebar with the player's portrait.
 TrialChatWhispers = {}
 local Whispers = TrialChatWhispers
 
@@ -12,12 +12,21 @@ local normalizeName = TrialChatCommon.NormalizeName
 local shortName = TrialChatCommon.ShortName
 local isSelf = TrialChatCommon.IsSelf
 
--- A whisper is a normal chat message, so it keeps the game's own limit.
+-- One addon message carries 255 bytes and a longer one goes in parts, so this
+-- limit is only here to keep a whisper the size the game's own whispers are.
 local MAX_MESSAGE_BYTES = 255
 local MAX_HISTORY = 500
 local MAX_CONVERSATIONS = 60
 Whispers.MAX_MESSAGE_BYTES = MAX_MESSAGE_BYTES
 Whispers.MAX_HISTORY = MAX_HISTORY
+
+-- The addon-message prefix (TrialChat.lua registers it) and the tag that
+-- marks a whisper conversation's packets, kept apart from the nearby chat
+-- ("M:", "E:", "S:", "P:", "C:") and group ("TCG1|") packets that share it.
+local ADDON_PREFIX = "TrialChat"
+local WHISPER_TAG = "TCW1|"
+local WHISPER_PART_BYTES = 180
+local incomingParts = TrialChatCommon.NewPartCollector()
 
 local PREFIX = "whisper:"
 
@@ -88,7 +97,7 @@ local function markRead(conversation)
 end
 
 -- A new conversation, or an existing one kept up to date with the name the
--- game reports (which carries the realm on a cross-realm whisper).
+-- sender reports (which carries the realm on a cross-realm whisper).
 local function ensureConversation(name)
     ensureLoaded()
     local id = getWhisperId(name)
@@ -138,8 +147,30 @@ end
 ---------------------------------------------------------------------------
 -- Sending
 ---------------------------------------------------------------------------
--- A whisper is sent as the game's own whisper, so it shows up in the normal
--- chat for both players and needs no addon on the other side.
+-- Whispers go out as addon messages addressed to the conversation's player,
+-- so they reach them the same way nearby chat does, with no game whisper the
+-- game would refuse on a trial account.
+local function sendPacket(conversation, payload)
+    C_ChatInfo.SendAddonMessage(ADDON_PREFIX, WHISPER_TAG .. payload,
+        "WHISPER", conversation.name)
+end
+
+-- A reply quote and emoji markup can make a message outgrow one addon
+-- message; then it goes in numbered parts the receiver puts back together,
+-- the kind (a message or an emote) riding on each part.
+local function sendBody(conversation, kind, body)
+    if #WHISPER_TAG + #kind + 1 + #body <= 255 then
+        sendPacket(conversation, kind .. "|" .. body)
+        return
+    end
+    local partId = TrialChatCommon.NewPartId()
+    local parts = TrialChatCommon.SplitIntoParts(body, WHISPER_PART_BYTES)
+    for index, part in ipairs(parts) do
+        sendPacket(conversation, "PART|" .. kind .. ":" .. partId .. ":"
+            .. index .. ":" .. #parts .. ":" .. part)
+    end
+end
+
 function Whispers:SendMessage(id, message, reply)
     ensureLoaded()
     local conversation = id and conversations[id]
@@ -170,29 +201,62 @@ function Whispers:SendMessage(id, message, reply)
         message, isEmote, reply, true)
     notifyChange("message", id, entry, true)
 
-    -- Pipes would be read back as markup, so they're doubled for the wire.
-    SendChatMessage(TrialChatCommon.EscapeChatPipes(message), "WHISPER", nil,
-        conversation.name)
+    -- Pipes would be read back as markup, so they're encoded for the wire;
+    -- a reply rides at the front the way it does in a group message.
+    sendBody(conversation, isEmote and "EMOTE" or "MSG",
+        TrialChatCommon.EncodeReplyPrefix(reply)
+            .. TrialChatCommon.EncodeMessageMarkup(
+                TrialChatCommon.AddOwnSongLinkOwner(message)))
 end
 
 ---------------------------------------------------------------------------
 -- Receiving
 ---------------------------------------------------------------------------
-local function onWhisper(message, sender)
-    if type(sender) ~= "string" or sender == "" then return end
-    if isSelf(sender) then return end
-    message = strtrim(message or "")
+local function onAddonWhisper(sender, kind, body)
+    if kind == "PART" then
+        local partKind, partId, index, count, chunk =
+            string.match(body, "^(%a+):([%x%-]+):(%d+):(%d+):(.*)$")
+        body = incomingParts:Add(normalizeName(sender),
+            partId, tonumber(index), tonumber(count), chunk)
+        if not body then return end
+        kind = partKind
+    end
+    if kind ~= "MSG" and kind ~= "EMOTE" then return end
+
+    -- Kept encoded until here: the reply prefix's separators only read as
+    -- separators before decoding the rest of the text.
+    local reply, encodedText = TrialChatCommon.SplitReplyPrefix(body)
+    local message = TrialChatCommon.NormalizeMessageMarkup(
+        TrialChatCommon.DecodeMessageMarkup(encodedText))
     if message == "" then return end
+    if reply then
+        reply.text = TrialChatCommon.NormalizeMessageMarkup(reply.text or "")
+    end
 
     local conversation = ensureConversation(sender)
-    local entry = addEntry(conversation, sender, message, false, nil, false)
+    -- The game plays its tell sound for a normal whisper; an addon message
+    -- has to make its own, and only when the conversation isn't being read.
+    if viewedId ~= conversation.id then
+        PlaySound(SOUNDKIT.TELL_MESSAGE)
+    end
+    local entry = addEntry(conversation, sender, message, kind == "EMOTE", reply, false)
     notifyChange("message", conversation.id, entry, true)
 end
 
 local eventFrame = CreateFrame("Frame")
-eventFrame:RegisterEvent("CHAT_MSG_WHISPER")
-eventFrame:SetScript("OnEvent", function(_, _, message, sender)
-    onWhisper(message, sender)
+eventFrame:RegisterEvent("CHAT_MSG_ADDON")
+eventFrame:SetScript("OnEvent", function(_, _, prefix, message, distribution, sender)
+    if prefix ~= ADDON_PREFIX or distribution ~= "WHISPER" then return end
+    if type(message) ~= "string" or type(sender) ~= "string" or sender == "" then
+        return
+    end
+    if isSelf(sender) then return end
+    if string.sub(message, 1, #WHISPER_TAG) ~= WHISPER_TAG then return end
+
+    local kind, body = string.match(message, "^" .. WHISPER_TAG .. "([^|]+)|(.*)$")
+    if kind then
+        onAddonWhisper(sender, kind, body)
+    end
 end)
 
 ---------------------------------------------------------------------------

@@ -329,7 +329,7 @@ local function updateHeader()
         end
         header.subtitle:SetText(subtitle)
     elseif whisperChat then
-        header.subtitle:SetText("Whisper" .. SEPARATOR .. "normal chat")
+        header.subtitle:SetText("Whisper" .. SEPARATOR .. "TrialChat only")
     elseif info then
         local subtitle = info.online .. " online" .. SEPARATOR .. plural(info.members, "member")
         if info.loadingHistory then
@@ -1622,6 +1622,7 @@ local function createWindow()
         -- it: closing or minimizing the chat puts the picker away too.
         if TrialChatEmojiPicker.IsShown() then TrialChatEmojiPicker.Hide() end
         Groups:SetViewedGroup(nil)
+        Whispers:SetViewed(nil)
         composer.input:ClearFocus()
         searchField:ClearFocus()
         addListenerField:ClearFocus()
@@ -1732,7 +1733,7 @@ local function onGroupsChange(kind, id, entry, appended)
         -- If the creator is looking at this group right now, tell them
         -- immediately; selecting the group again won't re-trigger the
         -- on-view notice in selectConversation.
-        if name and reason ~= "kicked" and id == selected and isViewShown()
+        if name and reason == "left" and id == selected and isViewShown()
             and Groups:IsCreator(id) then
             local left = Groups:GetLeftMembersInfo(id)
             local key = name and TrialChatCommon.NormalizeName(name)

@@ -285,6 +285,12 @@ local function showMinimapTooltip(button)
         GameTooltip:AddLine(unread .. " unread group message"
             .. (unread == 1 and "" or "s") .. ".", 1, 0.49, 0.04)
     end
+    local whisperUnread = TrialChatWhispers
+        and TrialChatWhispers:GetTotalUnreadCount() or 0
+    if whisperUnread > 0 then
+        GameTooltip:AddLine(whisperUnread .. " unread whisper"
+            .. (whisperUnread == 1 and "" or "s") .. ".", 1, 0.49, 0.04)
+    end
     TrialChatDB = TrialChatDB or {}
     if TrialChatDB.echoToSay then
         GameTooltip:AddLine("Echo to Say (/s): ON", 0, 1, 0)

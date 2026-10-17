@@ -175,7 +175,9 @@ function Groups:GetLeftMembersInfo(id)
 end
 
 -- Persist the pending "left while others were offline" notices so they survive
--- a UI reload before the creator next opens the group.
+-- a UI reload before the creator next opens the group. They're saved under a
+-- key of their own: older versions recorded a disconnect or a timeout here
+-- too, and those records aren't leaves, so they're left behind unread.
 local function persistLeftMembers(id)
     local saved = getSavedGroups()[id]
     if not saved then return end
@@ -186,15 +188,15 @@ local function persistLeftMembers(id)
     table.sort(list, function(a, b)
         return normalizeName(a) < normalizeName(b)
     end)
-    saved.leftMembers = #list > 0 and list or nil
+    saved.leftNotices = #list > 0 and list or nil
 end
 
 local function restoreLeftMembers(id, savedGroup)
-    if type(savedGroup) ~= "table" or type(savedGroup.leftMembers) ~= "table" then
+    if type(savedGroup) ~= "table" or type(savedGroup.leftNotices) ~= "table" then
         return
     end
     leftMembers[id] = leftMembers[id] or {}
-    for _, name in ipairs(savedGroup.leftMembers) do
+    for _, name in ipairs(savedGroup.leftNotices) do
         if type(name) == "string" and name ~= "" then
             local key = normalizeName(name)
             if key and not leftMembers[id][key] then
@@ -264,10 +266,12 @@ local function removeMember(session, name, reason)
     local key = findMemberKey(session, name)
     local wasMember = (key ~= nil)
     if key then session.members[key] = nil end
-    -- Also drop them from the known (offline-capable) list when they left for
-    -- good (explicit leave or kick), so they don't linger there. A timeout
-    -- just means they went quiet; keep them as a possible reconnection path.
-    if session.knownMembers and reason ~= "timeout" then
+    -- A member is only forgotten when they leave the group on purpose or are
+    -- removed from it. Disconnecting, logging out or going quiet just takes
+    -- them off the online list: they stay a member, offline and reachable
+    -- again when they come back.
+    local goneForGood = reason == "left" or reason == "kicked"
+    if session.knownMembers and goneForGood then
         session.knownMembers[normalizeName(name)] = nil
     end
     if session.reconnectName and namesMatch(session.reconnectName, name) then
@@ -293,8 +297,10 @@ local function removeMember(session, name, reason)
     end
     -- If nobody else was around to see them go (except possibly you), note
     -- that they left so the creator can be told next time they see this
-    -- person. A kick isn't a voluntary leave, so it isn't recorded.
-    if wasMember and reason ~= "kicked" and not isSelf(name) then
+    -- person. Only a member who actually left the group is recorded: a
+    -- disconnect, a logout or a quiet timeout isn't leaving, and a kick isn't
+    -- a voluntary leave either.
+    if wasMember and reason == "left" and not isSelf(name) then
         local now = GetTime()
         local othersOnline = false
         for _, member in pairs(session.members) do
@@ -1093,12 +1099,14 @@ openGroupDialog = function(mode, preset)
     end)
 end
 
-local function disconnectSession(id)
+local function disconnectSession(id, leaveGroup)
     local session = activeGroups[id]
     if not session then return nil end
 
     persistGroup(session)
-    sendToMembers(session, "BYE")
+    -- Members are told apart: a real leave says so, so they remove the player
+    -- from the group; a plain disconnect only takes them offline.
+    sendToMembers(session, leaveGroup and "LEAVE" or "BYE")
     pendingGroupSaves[id] = nil
     activeGroups[id] = nil
     session.members = {}
@@ -1120,7 +1128,7 @@ local function exitGroup(id)
         return
     end
 
-    local session = disconnectSession(id)
+    local session = disconnectSession(id, true)
     pendingJoins[id] = nil
     pendingGroupSaves[id] = nil
     getSavedGroups()[id] = nil
@@ -1892,8 +1900,17 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
     end
 
     if kind == "BYE" then
+        -- They disconnected or logged out: they stay a member, just offline.
         if session and hasMember(session, sender) then
-            removeMember(session, sender)
+            removeMember(session, sender, "offline")
+        end
+        return
+    end
+
+    if kind == "LEAVE" then
+        -- They left the group on purpose: drop them and let the creator know.
+        if session and hasMember(session, sender) then
+            removeMember(session, sender, "left")
         end
         return
     end
