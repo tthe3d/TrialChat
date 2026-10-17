@@ -305,13 +305,19 @@ local function updateHeader()
     header.title:SetText(getConversationName(selected))
     local iconTexture = not nearbyChat and not whisperChat and Groups:GetIcon(selected)
     iconTexture = iconTexture and TrialChatCommon.GetIconTexture(iconTexture)
+    -- A whisper conversation shows the other player's portrait (or their
+    -- class icon when the game can't draw it), like their row in the sidebar;
+    -- the other conversations show their tile.
+    header.avatar:SetShown(whisperChat)
+    header.tile:SetShown(not whisperChat)
     if nearbyChat then
         header.tile:SetLook(Color.tile, Color.textSoft, nil, "pin")
     elseif whisperChat then
         local whisper = Whispers:GetInfo(selected)
-        local classFile = whisper and TrialChatCommon.GetKnownClass(whisper.name)
-        header.tile:SetLook(UI.ClassColor(classFile) or Color.tile, Color.textSoft,
-            getInitials(getConversationName(selected)))
+        local name = whisper and whisper.name or ""
+        local classFile = TrialChatCommon.GetKnownClass(name)
+        header.avatar:SetPerson(name,
+            UI.ClassColor(classFile) or Color.textSoft, classFile)
     elseif iconTexture then
         header.tile.box:SetColor(Color.tile)
         header.tile:SetTexture(iconTexture)
@@ -1308,6 +1314,12 @@ local function createHeader()
         GameTooltip:Show()
     end)
     header.tile:SetScript("OnLeave", GameTooltip_Hide)
+    -- A whisper conversation shows the other player here, like their row in
+    -- the sidebar: the tile is aside while it's up, in the same spot.
+    header.avatar = UI.CreateAvatar(main, 28)
+    header.avatar:SetPoint("TOPLEFT", main, "TOPLEFT", 20, -16)
+    header.avatar:EnableMouse(false)
+    header.avatar:Hide()
     header.title = UI.CreateText(main, UI.Font.heading, Color.white)
     header.title:SetPoint("TOPLEFT", header.tile, "TOPRIGHT", 10, -1)
     header.title:SetJustifyH("LEFT")

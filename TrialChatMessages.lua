@@ -338,6 +338,12 @@ function TrialChatMessageList.Create(parent)
     list.scrollBox = scrollBox
     list.scrollBar = scrollBar
 
+    -- The log takes the mouse even where no row does (an empty conversation,
+    -- or the space below the last message), so a drag there no longer falls
+    -- through to the window and drags the whole window around; the messages
+    -- themselves sit above it and keep their own clicks and links.
+    scrollBox:EnableMouse(true)
+
     list.measure = scrollBox:CreateFontString(nil, "ARTWORK")
     list.measure:SetFontObject(UI.Font.body)
     list.measure:SetPoint("TOPLEFT", scrollBox, "TOPLEFT")
