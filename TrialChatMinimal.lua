@@ -14,10 +14,11 @@ local DEFAULT_WIDTH = 520
 local MIN_WIDTH, MAX_WIDTH = 320, 1000
 local DEFAULT_AREA_HEIGHT = 200
 local MIN_AREA_HEIGHT, MAX_AREA_HEIGHT = 60, 600
--- Messages kept to show; as many as fit are on screen. Scrolling back loads
--- older ones from the conversation's history, this many at a time.
-local MAX_LINES = 50
-local LOAD_LINES = 50
+-- Messages kept to show; as many as fit are on screen. The conversation's
+-- whole stored history is loaded with them, like in the full view (it is
+-- capped where it is stored); this is only a backstop for very long
+-- sessions.
+local MAX_LINES = 2000
 -- Lines per mouse wheel notch, and how long it stays scrolled back once
 -- you've stopped using it.
 local SCROLL_LINES = 2
@@ -753,7 +754,6 @@ function View:LayoutLines()
     local count = #self.lines
     self.scroll = clamp(self.scroll, 0, math.max(0, count - 1))
     local shown = 0
-    self.showsOldest = true
     for rank = 1, count - self.scroll do
         local line = self.lines[count - self.scroll - rank + 1]
         local chip = self.chips[rank] or self:CreateChip()
@@ -763,12 +763,10 @@ function View:LayoutLines()
         chip.text:SetWidth(width)
         local height = math.max(LINE_MIN_HEIGHT,
             math.ceil(chip.text:GetStringHeight()) + 2 * LINE_PADDING_Y)
-        if y + height > limit then
-            -- It only fits in part; everything above it would be cut away
-            -- completely, so it is the last line shown.
-            self.showsOldest = false
-            if y >= limit then break end
-        end
+        -- A line starting at or above the top edge would be cut away
+        -- completely, so it is not shown; one cut in part shows what fits
+        -- of it and is the last line shown.
+        if y >= limit then break end
         chip.line = line
         local entry = line.entry
         chip.onReplyJump = (type(entry) == "table" and entry.reply)
@@ -805,55 +803,13 @@ function View:UpdateNewestButton()
     button:SetPoint("BOTTOMRIGHT", self.frame, "BOTTOMRIGHT", -PADDING, self:GetLinesBottom())
 end
 
--- Adds the conversation's older messages in front of the lines; false when
--- there are none.
-function View:LoadOlder()
-    local entries, format, colorFor = self.controller.GetEntries()
-    local oldest
-    for _, line in ipairs(self.lines) do
-        if line.entry ~= nil then
-            oldest = line.entry
-            break
-        end
-    end
-    local first = #entries + 1
-    if oldest ~= nil then
-        first = nil
-        for index = #entries, 1, -1 do
-            if entries[index] == oldest then
-                first = index
-                break
-            end
-        end
-    end
-    if not first or first <= 1 then return false end
-
-    local now = GetTime()
-    local lines = {}
-    for index = math.max(1, first - LOAD_LINES), first - 1 do
-        local line = self:MakeLine(entries[index], format, colorFor)
-        if line then
-            line.shownAt = now
-            lines[#lines + 1] = line
-        end
-    end
-    if #lines == 0 then return false end
-    for _, line in ipairs(self.lines) do
-        lines[#lines + 1] = line
-    end
-    self.lines = lines
-    return true
-end
-
--- Scrolls back into older messages (positive) or forward.
+-- Scrolls back into older messages (positive) or forward. The whole stored
+-- history is loaded (see Render), so this is a plain scroll.
 function View:Scroll(lines)
     self.lastInteractionAt = GetTime()
     if lines > 0 then
-        for _ = 1, lines do
-            if self.showsOldest and not self:LoadOlder() then break end
-            self.scroll = self.scroll + 1
-            self:LayoutLines()
-        end
+        self.scroll = self.scroll + lines
+        self:LayoutLines()
         return
     end
     self.scroll = math.max(0, self.scroll + lines)
@@ -869,9 +825,9 @@ function View:ScrollToNewest()
     self:LayoutLines()
 end
 
--- Scrolls back to the message a reply quotes, when it is among the loaded
--- lines. entry is the reply-carrying line's message; the nearest quote
--- before it wins.
+-- Scrolls back to the message a reply quotes; the whole history is loaded
+-- (see Render), like in the full view. entry is the reply-carrying line's
+-- message; the nearest quote before it wins.
 function View:JumpToReply(entry)
     local reply = type(entry) == "table" and entry.reply
     if not reply then return end
@@ -915,14 +871,15 @@ function View:AddLine(line, jumpToNewest)
     self:LayoutLines()
 end
 
--- Shows the newest messages of the open conversation.
+-- Shows the whole stored history of the open conversation, like the full
+-- view; as many lines as fit are on screen (see LayoutLines).
 function View:Render()
     local entries, format, colorFor = self.controller.GetEntries()
     local now = GetTime()
     self.lines = {}
     self.scroll = 0
     self.newCount = 0
-    for index = math.max(1, #entries - MAX_LINES + 1), #entries do
+    for index = 1, #entries do
         local line = self:MakeLine(entries[index], format, colorFor)
         if line then
             line.shownAt = now

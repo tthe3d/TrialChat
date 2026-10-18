@@ -419,11 +419,15 @@ frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
     end
 
     -- A sound emote someone triggered: only its name travels, and you play
-    -- your own copy of the file, so everyone around you hears it too.
+    -- your own copy of the file, so everyone around you hears it too. The
+    -- header's bell mutes them; the sender still counts as active either
+    -- way, so presence never depends on the sound.
     if string.sub(message, 1, #SOUND_TAG) == SOUND_TAG then
         noteActiveListener(sender)
-        TrialChatCommon.PlayReceivedSoundEmote(sender,
-            string.sub(message, #SOUND_TAG + 1))
+        if not Nearby:IsSoundEmotesMuted() then
+            TrialChatCommon.PlayReceivedSoundEmote(sender,
+                string.sub(message, #SOUND_TAG + 1))
+        end
         return
     end
 
@@ -725,6 +729,17 @@ end
 
 function Nearby:GetClass(name)
     return getKnownClass(name)
+end
+
+-- Sound emotes are the only sound nearby chat makes, so its bell mutes
+-- just them (a group's bell also mutes the message sound). This mutes
+-- what other players trigger; a "//name" you type yourself still plays.
+function Nearby:IsSoundEmotesMuted()
+    return TrialChatDB.nearbySoundEmotesMuted == true
+end
+
+function Nearby:SetSoundEmotesMuted(muted)
+    TrialChatDB.nearbySoundEmotesMuted = muted == true or nil
 end
 
 local function countsAsListener(name)

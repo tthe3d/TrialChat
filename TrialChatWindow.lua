@@ -340,13 +340,20 @@ local function updateHeader()
     header.title:SetText(getConversationName(selected))
     local iconTexture = not nearbyChat and not whisperChat and Groups:GetIcon(selected)
     iconTexture = iconTexture and TrialChatCommon.GetIconTexture(iconTexture)
+    -- Whispers show the person's avatar in place of the tile.
+    header.tile:SetShown(not whisperChat)
+    header.avatar:SetShown(whisperChat)
     if nearbyChat then
         header.tile:SetLook(Color.tile, Color.textSoft, nil, "pin")
     elseif whisperChat then
         local whisper = Whispers:GetInfo(selected)
         local classFile = whisper and TrialChatCommon.GetKnownClass(whisper.name)
-        header.tile:SetLook(UI.ClassColor(classFile) or Color.tile, Color.textSoft,
-            getInitials(getConversationName(selected)))
+        -- The same avatar as in the conversation list: their portrait when
+        -- the game can draw it, their class or race look, and their first
+        -- letter only when neither is known.
+        header.avatar:SetPerson(whisper and whisper.name
+            or getConversationName(selected),
+            UI.ClassColor(classFile) or Color.textSoft, classFile)
     elseif iconTexture then
         header.tile.box:SetColor(Color.tile)
         header.tile:SetTexture(iconTexture)
@@ -374,12 +381,16 @@ local function updateHeader()
             end
         end
         header.subtitle:SetText(subtitle)
-        UI.SetIcon(header.muteButton.icon, info.muted and "bellOff" or "bell")
-        header.muteButton.muted = info.muted
     end
+    -- The bell mutes a group's message sound and sound emotes, and
+    -- nearby's sound emotes; whispers make no sound at all.
+    local muted = nearbyChat and Nearby:IsSoundEmotesMuted()
+        or info and info.muted
+    UI.SetIcon(header.muteButton.icon, muted and "bellOff" or "bell")
+    header.muteButton.muted = muted
     updateSyncButton(info or nil)
     header.syncButton:SetShown(not nearbyChat and not whisperChat)
-    header.muteButton:SetShown(not nearbyChat and not whisperChat)
+    header.muteButton:SetShown(not whisperChat)
     UI.SetButtonActive(header.membersButton, membersShown)
 end
 
@@ -892,6 +903,11 @@ local function onConversationClick(row, button)
     elseif element.prompt then
         -- Join prompts are answered with the row's own buttons, not by
         -- clicking the row.
+    elseif isWhisper(element.key) then
+        -- A whisper opens whether or not the player is there; anything
+        -- sent while they're away goes out when they're back (see
+        -- TrialChatWhispers).
+        selectConversation(element.key)
     elseif element.state == "offline" then
         Groups:Connect(element.key)
     elseif element.state == "online" then
@@ -908,12 +924,17 @@ local function onConversationEnter(row)
     row.hovered = true
     updateConversationRowHover(row)
     local element = row.element
-    if element and element.state == "offline" and not element.prompt then
-        GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
+    if not element or element.prompt or element.state ~= "offline" then return end
+    GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
+    if isWhisper(element.key) then
+        GameTooltip:SetText(element.name .. " is offline.")
+        GameTooltip:AddLine("Messages you send are delivered when they come back.",
+            1, 1, 1)
+    else
         GameTooltip:SetText("Click to connect to " .. element.name .. ".")
         GameTooltip:AddLine("Right-click for more options.", 1, 1, 1)
-        GameTooltip:Show()
     end
+    GameTooltip:Show()
 end
 
 local function onConversationLeave(row)
@@ -1365,6 +1386,13 @@ local function createHeader()
         GameTooltip:Show()
     end)
     header.tile:SetScript("OnLeave", GameTooltip_Hide)
+    -- In place of the tile for whispers, the same round avatar as in the
+    -- conversation list. The title stays anchored to the tile, which keeps
+    -- its place while hidden, so nothing moves between the two.
+    header.avatar = UI.CreateAvatar(main, 28)
+    header.avatar:SetPoint("TOPLEFT", main, "TOPLEFT", 20, -16)
+    header.avatar:EnableMouse(false)
+    header.avatar:Hide()
     header.title = UI.CreateText(main, UI.Font.heading, Color.white)
     header.title:SetPoint("TOPLEFT", header.tile, "TOPRIGHT", 10, -1)
     header.title:SetJustifyH("LEFT")
@@ -1406,11 +1434,19 @@ local function createHeader()
     header.muteButton = UI.CreateButton(main, {
         icon = "bell", iconSize = 17, width = 32, height = 32,
         tooltip = function(self)
-            return self.muted and "Turn the message sound back on"
-                or "Mute the message sound for this group"
+            if isNearby(selected) then
+                return self.muted and "Turn sound emotes back on"
+                    or "Mute the sound emotes in nearby chat"
+            end
+            return self.muted and "Turn the message sound and sound emotes back on"
+                or "Mute the message sound and sound emotes for this group"
         end,
         onClick = function(self)
-            Groups:SetMuted(selected, not self.muted)
+            if isNearby(selected) then
+                Nearby:SetSoundEmotesMuted(not self.muted)
+            else
+                Groups:SetMuted(selected, not self.muted)
+            end
             updateHeader()
             if GameTooltip:GetOwner() == self then
                 self:GetScript("OnEnter")(self)
