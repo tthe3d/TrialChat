@@ -376,7 +376,7 @@ local function sendGroupProtocol(session, kind, target, body)
     end
 
     local sent, err = pcall(
-        C_ChatInfo.SendAddonMessage, PREFIX, payload, "WHISPER", target)
+        TrialChatCommon.SendAddonWhisper, PREFIX, payload, target)
     if not sent then
         showNotice("Could not send a group message to " .. target .. ": " .. err)
     end
@@ -908,6 +908,18 @@ local function getJoinCandidates(savedGroup, preferredName)
     return candidates
 end
 
+-- Players the game said aren't online when TrialChat whispered them, by
+-- character, with when. Connecting skips them for a while instead of waiting
+-- on each in turn, and hearing from them clears it.
+local OFFLINE_SKIP_SECONDS = 120
+local offlineAt = {}
+
+local function seemsOffline(name)
+    local key = TrialChatCommon.NormalizeCharacterName(name)
+    local at = key and offlineAt[key]
+    return at ~= nil and GetTime() - at < OFFLINE_SKIP_SECONDS
+end
+
 local function isJoinCandidate(session, name)
     for _, candidate in ipairs(session.joinCandidates or {}) do
         if namesMatch(candidate, name) then return true end
@@ -935,14 +947,17 @@ local function activateGroup(session)
     end
 end
 
-local function completePendingJoin(session, sender)
+-- skipHistory: the history goes to them another way (answering their hello).
+local function completePendingJoin(session, sender, skipHistory)
     addMember(session, sender)
     activateGroup(session)
     sendToMembers(session, "MEMBER", selfName or UnitName("player"))
     if getOwnLook() then
         sendToMembers(session, "LOOK", getOwnLook())
     end
-    sendHistoryToMember(session, sender)
+    if not skipHistory then
+        sendHistoryToMember(session, sender)
+    end
 end
 
 local function validateMemberName(name)
@@ -1010,57 +1025,84 @@ local function joinGroup(name, password, targetName, savedGroup, autoJoin)
     startJoinAttempt(session, 1)
 end
 
+-- How long to wait on one member before asking the next, and how often to
+-- say hello again meanwhile (a whisper can get lost). A member who isn't
+-- online is skipped as soon as the game says so (see OnPlayerOffline below).
+local JOIN_ATTEMPT_SECONDS = 6
+local JOIN_RETRY_SECONDS = 2
+
+-- Nobody answered. A saved group opens anyway, with just you in it, and keeps
+-- looking for its members (see lookForMembers); at login that happens
+-- quietly, while a connect you asked for says so.
+local function finishJoinWithoutAnswer(session)
+    local id = session.id
+    pendingJoins[id] = nil
+    notifyChange("groups", id)
+    if session.isCreator or session.hasSavedGroup then
+        if not session.autoJoin then
+            showNotice("Nobody from " .. session.name .. " is online right now."
+                .. " It's open, and you'll be connected when someone comes online.")
+        end
+        createGroup(session.name, session.password, getSavedGroups()[id] or {
+            name = session.name,
+            password = session.password,
+            icon = session.icon,
+            isCreator = session.isCreator == true,
+            creatorName = session.creatorName,
+            memberName = session.reconnectName,
+            history = session.history,
+            knownMembers = session.knownMembers,
+            muted = session.muted,
+            unreadTracking = true,
+        }, session.autoJoin)
+        return
+    end
+
+    showNotice("No saved group member replied. Choose an online member if one is available.")
+    openGroupDialog("join", getSavedGroups()[id] or {
+        name = session.name,
+        password = session.password,
+        memberName = session.targetName,
+        knownMembers = session.knownMembers,
+    })
+end
+
 startJoinAttempt = function(session, candidateIndex)
     local id = session.id
+    if pendingJoins[id] ~= session then return end
+    while session.joinCandidates[candidateIndex]
+        and seemsOffline(session.joinCandidates[candidateIndex]) do
+        candidateIndex = candidateIndex + 1
+    end
     local targetName = session.joinCandidates[candidateIndex]
+    if not targetName then
+        finishJoinWithoutAnswer(session)
+        return
+    end
     session.targetName = targetName
+    session.candidateIndex = candidateIndex
+    session.joinAttempt = (session.joinAttempt or 0) + 1
+    local attempt = session.joinAttempt
     if not sendGroupProtocol(session, "HELLO", targetName, session.password) then
         pendingJoins[id] = nil
         notifyChange("groups", id)
         return
     end
 
-    for retry = 1, 3 do
-        C_Timer.After(retry * 2, function()
-            if pendingJoins[id] == session and session.targetName == targetName then
+    local function stillWaiting()
+        return pendingJoins[id] == session and session.joinAttempt == attempt
+    end
+    for retry = 1, math.floor((JOIN_ATTEMPT_SECONDS - 1) / JOIN_RETRY_SECONDS) do
+        C_Timer.After(retry * JOIN_RETRY_SECONDS, function()
+            if stillWaiting() then
                 sendGroupProtocol(session, "HELLO", targetName, session.password)
             end
         end)
     end
-    C_Timer.After(8, function()
-        if pendingJoins[id] ~= session or session.targetName ~= targetName then return end
-        local nextCandidate = candidateIndex + 1
-        if session.joinCandidates[nextCandidate] then
-            startJoinAttempt(session, nextCandidate)
-            return
+    C_Timer.After(JOIN_ATTEMPT_SECONDS, function()
+        if stillWaiting() then
+            startJoinAttempt(session, candidateIndex + 1)
         end
-
-        pendingJoins[id] = nil
-        notifyChange("groups", id)
-        if session.isCreator or session.hasSavedGroup then
-            showNotice("No saved group member replied. Opening your saved group locally.")
-            createGroup(session.name, session.password, getSavedGroups()[id] or {
-                name = session.name,
-                password = session.password,
-                icon = session.icon,
-                isCreator = session.isCreator == true,
-                creatorName = session.creatorName,
-                memberName = session.reconnectName,
-                history = session.history,
-                knownMembers = session.knownMembers,
-                muted = session.muted,
-                unreadTracking = true,
-            }, session.autoJoin)
-            return
-        end
-
-        showNotice("No saved group member replied. Choose an online member if one is available.")
-        openGroupDialog("join", getSavedGroups()[id] or {
-            name = session.name,
-            password = session.password,
-            memberName = targetName,
-            knownMembers = session.knownMembers,
-        })
     end)
 end
 
@@ -1099,6 +1141,86 @@ createGroup = function(name, password, savedGroup, autoJoin, icon)
     end
     restoreLeftMembers(id, savedGroup)
     activateGroup(session)
+end
+
+-- The game said a player TrialChat whispered isn't online. Connecting moves
+-- on to the next member right away, and a member who dropped without saying
+-- goodbye (a disconnect or a crash) shows offline now, instead of being
+-- whispered until the heartbeat gives up on them.
+TrialChatCommon.OnPlayerOffline(function(name)
+    local key = TrialChatCommon.NormalizeCharacterName(name)
+    if not key or isSelf(name) then return end
+    offlineAt[key] = GetTime()
+    local waiting = {}
+    for _, session in pairs(pendingJoins) do
+        if session.targetName and namesMatch(session.targetName, name) then
+            waiting[#waiting + 1] = session
+        end
+    end
+    for _, session in ipairs(waiting) do
+        startJoinAttempt(session, (session.candidateIndex or 1) + 1)
+    end
+    for _, session in pairs(activeGroups) do
+        if hasMember(session, name) then
+            removeMember(session, name, "offline")
+        end
+    end
+end)
+
+-- A group open with nobody else in it (everyone was offline when it opened,
+-- or two halves of it opened apart) keeps looking for its members: now and
+-- then it says hello to a few saved members it hasn't seen offline lately,
+-- less often the longer nobody answers. Whoever has the group open lets it
+-- in (see WELCOME below), and the two join up.
+local LOOK_FOR_MEMBERS_SECONDS = 30
+local LOOK_FOR_MEMBERS_MAX_SECONDS = 300
+local LOOK_FOR_MEMBERS_HELLOS = 3
+local HELLO_ANSWER_SECONDS = 60
+
+local function isAlone(session)
+    for _, member in pairs(session.members) do
+        if not isSelf(member.name) then return false end
+    end
+    return true
+end
+
+local function lookForMembers(session)
+    if not isAlone(session) then
+        session.lookDelay, session.lookAt = nil, nil
+        return
+    end
+    local now = GetTime()
+    if session.lookAt and now < session.lookAt then return end
+    session.lookDelay = math.min(LOOK_FOR_MEMBERS_MAX_SECONDS,
+        session.lookDelay and session.lookDelay * 2 or LOOK_FOR_MEMBERS_SECONDS)
+    session.lookAt = now + session.lookDelay
+
+    local names = {}
+    for _, name in pairs(session.knownMembers or {}) do
+        if not isSelf(name) and not isBanned(session, name) then
+            names[#names + 1] = name
+        end
+    end
+    if #names == 0 then return end
+    table.sort(names, function(left, right)
+        return normalizeName(left) < normalizeName(right)
+    end)
+    session.helloSentAt = session.helloSentAt or {}
+    local first = session.lookCursor or 0
+    local sent = 0
+    for step = 1, #names do
+        local name = names[(first + step - 1) % #names + 1]
+        if not seemsOffline(name) then
+            session.helloSentAt[normalizeName(name)] = now
+            sendGroupProtocol(session, "HELLO", name, session.password)
+            sent = sent + 1
+            if sent == LOOK_FOR_MEMBERS_HELLOS then
+                session.lookCursor = (first + step) % #names
+                return
+            end
+        end
+    end
+    session.lookCursor = 0
 end
 
 -- Why a group name and password can't be used, or nil when they can.
@@ -1856,6 +1978,9 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
     local session = activeGroups[id]
     local pending = pendingJoins[id]
     if isSelf(sender) then return end
+    -- Hearing from them means they're online (again).
+    local senderKey = TrialChatCommon.NormalizeCharacterName(sender)
+    if senderKey then offlineAt[senderKey] = nil end
 
     if kind == "INVITE" then
         receiveInvite(id, sender, body)
@@ -1868,6 +1993,14 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
     end
 
     if kind == "HELLO" then
+        -- Two members logging in at the same moment each wait to be let in
+        -- by the other. Whoever hears a hello first lets them in, so the two
+        -- connect to each other instead of each opening the group alone.
+        if not session and pending and body == pending.password
+            and not isBanned(pending, sender) then
+            completePendingJoin(pending, sender, true)
+            session = activeGroups[id]
+        end
         -- Someone the creator removed can't just reconnect and rejoin.
         if session and body == session.password and not isBanned(session, sender) then
             addMember(session, sender)
@@ -1908,6 +2041,22 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
                 pending.isCreator = namesMatch(body, selfName)
             end
             completePendingJoin(pending, sender)
+        elseif session and not hasMember(session, sender) then
+            -- An answer to looking for members: the two join up.
+            local key = normalizeName(sender)
+            local helloAt = session.helloSentAt and session.helloSentAt[key]
+            if helloAt and GetTime() - helloAt <= HELLO_ANSWER_SECONDS then
+                session.helloSentAt[key] = nil
+                if body ~= "" and not session.creatorName then
+                    session.creatorName = body
+                end
+                addMember(session, sender)
+                sendGroupProtocol(session, "MEMBER", sender, selfName or UnitName("player"))
+                if getOwnLook() then
+                    sendGroupProtocol(session, "LOOK", sender, getOwnLook())
+                end
+                sendHistoryToMember(session, sender)
+            end
         end
         return
     end
@@ -1915,6 +2064,10 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
     if kind == "MEMBER" then
         if session and hasMember(session, sender) then
             addMember(session, body)
+        elseif session and namesMatch(body, sender) and isKnownMember(session, sender) then
+            -- A known member's heartbeat: they're online, perhaps after
+            -- showing offline when a whisper to them didn't get through.
+            addMember(session, sender)
         elseif pending and isJoinCandidate(pending, sender) then
             if body ~= "" then
                 addMember(pending, body)
@@ -2172,6 +2325,7 @@ C_Timer.NewTicker(MEMBER_UPDATE_INTERVAL, function()
                 removeMember(session, member.name, "timeout")
             end
         end
+        lookForMembers(session)
     end
 end)
 

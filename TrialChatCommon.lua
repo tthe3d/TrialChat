@@ -61,6 +61,98 @@ function TrialChatCommon.NormalizeRealm(realm)
     return TrialChatCommon.NormalizeName((string.gsub(realm or "", "[%s']", "")))
 end
 
+---------------------------------------------------------------------------
+-- Whispering players who aren't online
+--
+-- An addon whisper to a player who isn't online makes the game print "No
+-- player named X is currently playing." TrialChat whispers in the background
+-- all the time (connecting to groups, the group heartbeat, nearby listeners,
+-- whisper presence pings), which filled the chat with those lines. So it
+-- notes who it whispers, hides the line for them, and tells the rest of the
+-- addon they're offline. A whisper you type yourself keeps its line.
+---------------------------------------------------------------------------
+local OFFLINE_NOTICE_SECONDS = 10
+local addonWhisperedAt = {}
+local typedWhisperAt = {}
+local offlineHandlers = {}
+local notFoundPattern
+
+-- The game's (translated) "No player named '%s' is currently playing." as a
+-- pattern that captures the name, or false when it can't be made one.
+local function getNotFoundPattern()
+    if notFoundPattern == nil then
+        local template = ERR_CHAT_PLAYER_NOT_FOUND_S
+        if type(template) == "string" and string.find(template, "%s", 1, true) then
+            local escaped = string.gsub(template, "[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0")
+            notFoundPattern = "^" .. string.gsub(escaped, "%%%%s", "(.+)", 1) .. "$"
+        else
+            notFoundPattern = false
+        end
+    end
+    return notFoundPattern
+end
+
+-- The player a "not currently playing" line is about, when it is one.
+local function getNotFoundName(message)
+    if canaccessvalue and not canaccessvalue(message) then return nil end
+    if type(message) ~= "string" then return nil end
+    local pattern = getNotFoundPattern()
+    return pattern and string.match(message, pattern) or nil
+end
+
+local function whisperedRecently(times, name)
+    local key = TrialChatCommon.NormalizeCharacterName(name)
+    local at = key and times[key]
+    return at ~= nil and GetTime() - at <= OFFLINE_NOTICE_SECONDS
+end
+
+-- Sends an addon message to one player, noting it so the game's "not
+-- currently playing" line for them is hidden and the addon hears that
+-- they're offline (see OnPlayerOffline).
+function TrialChatCommon.SendAddonWhisper(prefix, message, target)
+    local key = TrialChatCommon.NormalizeCharacterName(target)
+    if key then addonWhisperedAt[key] = GetTime() end
+    return C_ChatInfo.SendAddonMessage(prefix, message, "WHISPER", target)
+end
+
+-- handler(name) runs when a player TrialChat just whispered turns out not to
+-- be online.
+function TrialChatCommon.OnPlayerOffline(handler)
+    offlineHandlers[#offlineHandlers + 1] = handler
+end
+
+local offlineFrame = CreateFrame("Frame")
+offlineFrame:RegisterEvent("CHAT_MSG_SYSTEM")
+offlineFrame:SetScript("OnEvent", function(_, _, message)
+    local name = getNotFoundName(message)
+    if not name or not whisperedRecently(addonWhisperedAt, name) then return end
+    for _, handler in ipairs(offlineHandlers) do
+        handler(name)
+    end
+end)
+
+-- Hides the line when it's about a TrialChat whisper. When you whispered the
+-- player yourself just now too, it stays: it may be about yours.
+local function hideAddonWhisperNotice(_, _, message)
+    local name = getNotFoundName(message)
+    return name ~= nil and whisperedRecently(addonWhisperedAt, name)
+        and not whisperedRecently(typedWhisperAt, name)
+end
+
+if ChatFrameUtil and ChatFrameUtil.AddMessageEventFilter then
+    ChatFrameUtil.AddMessageEventFilter("CHAT_MSG_SYSTEM", hideAddonWhisperNotice)
+elseif ChatFrame_AddMessageEventFilter then
+    ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", hideAddonWhisperNotice)
+end
+
+if C_ChatInfo and C_ChatInfo.SendChatMessage and hooksecurefunc then
+    hooksecurefunc(C_ChatInfo, "SendChatMessage", function(_, chatType, _, target)
+        if chatType ~= "WHISPER" or type(target) ~= "string" then return end
+        local key = TrialChatCommon.NormalizeCharacterName(target)
+        if key then typedWhisperAt[key] = GetTime() end
+    end)
+end
+
 -- Data that belongs to this character only, not the whole account: whispers
 -- and the saved groups they've chosen to join. It lives in
 -- TrialChatCharacterDB (see the .toc), which the game keeps per character.

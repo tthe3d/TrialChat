@@ -224,8 +224,7 @@ end
 -- so they reach them the same way nearby chat does, with no game whisper the
 -- game would refuse on a trial account.
 local function sendPacketTo(name, payload)
-    C_ChatInfo.SendAddonMessage(ADDON_PREFIX, WHISPER_TAG .. payload,
-        "WHISPER", name)
+    TrialChatCommon.SendAddonWhisper(ADDON_PREFIX, WHISPER_TAG .. payload, name)
 end
 
 local function sendPacket(conversation, payload)

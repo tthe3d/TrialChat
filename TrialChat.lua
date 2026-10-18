@@ -432,7 +432,7 @@ frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
     end
 
     if message == PING and channel == "WHISPER" then
-        C_ChatInfo.SendAddonMessage(PREFIX, PONG, "WHISPER", sender)
+        TrialChatCommon.SendAddonWhisper(PREFIX, PONG, sender)
         noteActiveListener(sender)
         return
     end
@@ -526,7 +526,7 @@ C_Timer.NewTicker(2, function()
                 processed[nameKey] = true
                 local lastPing = lastPingAt[nameKey]
                 if not lastPing or now - lastPing >= PING_INTERVAL then
-                    C_ChatInfo.SendAddonMessage(PREFIX, PING, "WHISPER", name)
+                    TrialChatCommon.SendAddonWhisper(PREFIX, PING, name)
                     lastPingAt[nameKey] = now
                     pendingPings[nameKey] = now
                     pingBudget = pingBudget - 1
@@ -597,11 +597,11 @@ local function sendNearbyPackets(packets)
                 local shortName = string.match(targetPlayer, "^([^-]+)")
                 if not classByName[targetKey]
                     and not (shortName and classByName[normalizeName(shortName)]) then
-                    C_ChatInfo.SendAddonMessage(PREFIX, classPayload, "WHISPER", targetPlayer)
+                    TrialChatCommon.SendAddonWhisper(PREFIX, classPayload, targetPlayer)
                 end
             end
             for _, packet in ipairs(packets) do
-                C_ChatInfo.SendAddonMessage(PREFIX, packet, "WHISPER", targetPlayer)
+                TrialChatCommon.SendAddonWhisper(PREFIX, packet, targetPlayer)
             end
         end
     end
