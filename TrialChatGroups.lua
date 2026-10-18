@@ -477,9 +477,12 @@ end
 -- fingerprint can't be turned back into the password, though a short
 -- password could still be guessed by trying many; a longer one holds up.
 --
--- Members on older versions don't know this. You can't connect through
--- them, but they can still connect through you: their hello still carries
--- the password, which is checked as before.
+-- Members on older versions don't know this; they can still connect
+-- through you, since their hello still carries the password, checked as
+-- before. To connect through one of them, a member that doesn't answer the
+-- request gets that old hello instead, but only if it already knows the
+-- password: a member of your saved group, or the player who invited you. A
+-- name you typed for a first connect never gets it.
 ---------------------------------------------------------------------------
 local AUTH_SECONDS = 60
 local challenges = {}
@@ -519,10 +522,28 @@ local function makeProof(group, label, name, nonceX, nonceR)
     }, "|")))
 end
 
--- A member the joiner may listen to: one it asked, that has vouched.
+-- A member the joiner may listen to: one it asked, that has vouched, or an
+-- older version it sent the old hello to (see mayTellPassword).
 local function hasVouched(group, name)
-    local at = group.vouched and group.vouched[characterKey(name)]
+    local key = characterKey(name)
+    local at = group.vouched and group.vouched[key]
+        or group.oldHelloAt and group.oldHelloAt[key]
     return at ~= nil and GetTime() - at <= AUTH_SECONDS
+end
+
+-- How long a member gets to answer the new request before an older version
+-- is assumed.
+local OLD_VERSION_SECONDS = 1.5
+
+-- Whether name already knows the password, so the old hello tells it
+-- nothing new: someone who was in the group with you, or who invited you.
+local function mayTellPassword(group, name)
+    if group.passwordFrom and namesMatch(group.passwordFrom, name) then return true end
+    if not group.knownMembers then return false end
+    for _, knownName in pairs(group.knownMembers) do
+        if namesMatch(knownName, name) then return true end
+    end
+    return false
 end
 
 
@@ -530,10 +551,17 @@ end
 -- number is kept for a little while, so a challenge to an earlier try of
 -- the same hello still fits.
 local function sayHello(session, target)
-    sendCaps(session, target)
     session.auth = session.auth or {}
     local key = characterKey(target)
     local auth = session.auth[key]
+    -- Asked before and never challenged: an older version, if anything.
+    if auth and not auth.nonceR and GetTime() - auth.at >= OLD_VERSION_SECONDS
+        and mayTellPassword(session, target) then
+        session.oldHelloAt = session.oldHelloAt or {}
+        session.oldHelloAt[key] = GetTime()
+        sendGroupProtocol(session, "HELLO", target, session.password)
+    end
+    sendCaps(session, target)
     if not auth or GetTime() - auth.at > AUTH_SECONDS / 2 then
         auth = { nonceX = newNonce(), at = GetTime() }
         session.auth[key] = auth
@@ -2065,6 +2093,11 @@ function Groups:AnswerInvite(join)
         local savedGroup = getSavedGroups()[invite.id]
         joinGroup(invite.name, invite.password, invite.sender,
             type(savedGroup) == "table" and savedGroup or nil)
+        -- They sent the password, so an older version of theirs may get
+        -- the old hello (see mayTellPassword).
+        if pendingJoins[invite.id] then
+            pendingJoins[invite.id].passwordFrom = invite.sender
+        end
     else
         declinedInvites[getDeclineKey(invite)] = GetTime()
         answerInvite(invite, "declined")
@@ -2299,10 +2332,12 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
             end
             completePendingJoin(pending, sender)
         elseif session and not hasMember(session, sender) then
-            -- An answer to looking for members, from a member that vouched:
-            -- the two join up.
+            -- An answer to looking for members, from a member that vouched
+            -- (or an older version sent the old hello): the two join up.
             if hasVouched(session, sender) then
-                session.vouched[characterKey(sender)] = nil
+                local key = characterKey(sender)
+                if session.vouched then session.vouched[key] = nil end
+                if session.oldHelloAt then session.oldHelloAt[key] = nil end
                 if body ~= "" and not session.creatorName then
                     session.creatorName = body
                 end
