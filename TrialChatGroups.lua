@@ -434,7 +434,7 @@ end
 -- only the history that's missing. Older versions ignore it and answer as
 -- they always have. The member answering says the same about itself, so the
 -- history going the other way is only what it's missing too.
-local PROTOCOL_VERSION = 2
+local PROTOCOL_VERSION = 3
 local CAPS_SECONDS = 60
 local capsFrom = {}
 
@@ -460,9 +460,85 @@ local function getCaps(id, name)
     if caps and GetTime() - caps.at <= CAPS_SECONDS then return caps end
 end
 
+---------------------------------------------------------------------------
+-- Joining without sending the password
+--
+-- A hello used to carry the group's password to whoever you connected
+-- through, so a name typed wrong, or someone posing as a member, got it.
+-- Now the two sides prove to each other that they know it, without sending
+-- it:
+--   AUTH       the joiner asks to join, with a random number;
+--   CHALLENGE  the member answers with a random number of its own;
+--   PROOF      the joiner sends a fingerprint of both numbers made with the
+--              password (an HMAC), which the member checks;
+--   VOUCH      if it checks out, the member proves the same in return, and
+--              lets them in (WELCOME and the rest, as before).
+-- The joiner trusts nothing from a member until it has vouched. A
+-- fingerprint can't be turned back into the password, though a short
+-- password could still be guessed by trying many; a longer one holds up.
+--
+-- Members on older versions don't know this. You can't connect through
+-- them, but they can still connect through you: their hello still carries
+-- the password, which is checked as before.
+---------------------------------------------------------------------------
+local AUTH_SECONDS = 60
+local challenges = {}
+-- Requests, challenges and vouches go by character ("Alice" typed and
+-- "Alice-Realm" heard back are the same player).
+local characterKey = TrialChatCommon.NormalizeCharacterName
+local nonceCounter = 0
+
+local function newNonce()
+    nonceCounter = nonceCounter + 1
+    return string.sub(TrialChatHash.ToHex(TrialChatHash.SHA256(table.concat({
+        tostring(GetTime()), tostring(GetServerTime()), tostring(math.random()),
+        tostring(math.random(0, 2147483647)), tostring(nonceCounter),
+        tostring(selfName), tostring(debugprofilestop and debugprofilestop() or 0),
+    }, "|"))), 1, 32)
+end
+
+local function isNonce(text)
+    return type(text) == "string" and #text == 32 and not string.find(text, "[^%x]")
+end
+
+local function getGroupKey(group)
+    if group.authKeyFor ~= group.password then
+        group.authKey = TrialChatHash.SHA256(
+            "TrialChat|" .. group.id .. "|" .. (group.password or ""))
+        group.authKeyFor = group.password
+    end
+    return group.authKey
+end
+
+-- label: "join" for the joiner's proof, "welcome" for the member's. name is
+-- whoever makes it, so one side's proof can't be passed off as the other's.
+local function makeProof(group, label, name, nonceX, nonceR)
+    return TrialChatHash.ToHex(TrialChatHash.HMAC(getGroupKey(group), table.concat({
+        label, group.id, TrialChatCommon.NormalizeCharacterName(name) or "",
+        nonceX, nonceR,
+    }, "|")))
+end
+
+-- A member the joiner may listen to: one it asked, that has vouched.
+local function hasVouched(group, name)
+    local at = group.vouched and group.vouched[characterKey(name)]
+    return at ~= nil and GetTime() - at <= AUTH_SECONDS
+end
+
+
+-- Asks to join through target: the version note, then AUTH. The same random
+-- number is kept for a little while, so a challenge to an earlier try of
+-- the same hello still fits.
 local function sayHello(session, target)
     sendCaps(session, target)
-    return sendGroupProtocol(session, "HELLO", target, session.password)
+    session.auth = session.auth or {}
+    local key = characterKey(target)
+    local auth = session.auth[key]
+    if not auth or GetTime() - auth.at > AUTH_SECONDS / 2 then
+        auth = { nonceX = newNonce(), at = GetTime() }
+        session.auth[key] = auth
+    end
+    return sendGroupProtocol(session, "AUTH", target, auth.nonceX)
 end
 
 -- Names, comma-separated, in as few messages as they fit in.
@@ -1011,6 +1087,10 @@ local function isJoinCandidate(session, name)
     return false
 end
 
+local function isTrustedCandidate(pending, name)
+    return isJoinCandidate(pending, name) and hasVouched(pending, name)
+end
+
 -- Shows a group you just connected to or asked for in TrialChat.
 local function showSession(session)
     notifyChange("open", session.id)
@@ -1260,7 +1340,6 @@ end)
 local LOOK_FOR_MEMBERS_SECONDS = 30
 local LOOK_FOR_MEMBERS_MAX_SECONDS = 300
 local LOOK_FOR_MEMBERS_HELLOS = 3
-local HELLO_ANSWER_SECONDS = 60
 
 local function isAlone(session)
     for _, member in pairs(session.members) do
@@ -1290,13 +1369,11 @@ local function lookForMembers(session)
     table.sort(names, function(left, right)
         return normalizeName(left) < normalizeName(right)
     end)
-    session.helloSentAt = session.helloSentAt or {}
     local first = session.lookCursor or 0
     local sent = 0
     for step = 1, #names do
         local name = names[(first + step - 1) % #names + 1]
         if not seemsOffline(name) then
-            session.helloSentAt[normalizeName(name)] = now
             sayHello(session, name)
             sent = sent + 1
             if sent == LOOK_FOR_MEMBERS_HELLOS then
@@ -1994,6 +2071,56 @@ function Groups:AnswerInvite(join)
     end
 end
 
+-- Lets sender into the group: who the creator is, your class and look, the
+-- member lists and the history they're missing. vouch, when they proved the
+-- password, is your proof of it, sent first.
+local function answerHello(session, id, sender, vouch)
+    local caps = getCaps(id, sender)
+    addMember(session, sender)
+    if caps then
+        sendCaps(session, sender)
+    end
+    if vouch then
+        sendGroupProtocol(session, "VOUCH", sender, vouch)
+    end
+    sendGroupProtocol(session, "WELCOME", sender,
+        session.creatorName or (session.isCreator and selfName) or "")
+    greetMember(session, sender)
+    -- Any member passes the icon on, so a newcomer has it even while the
+    -- creator is away.
+    if session.icon and not session.isCreator then
+        sendGroupProtocol(session, "ICON", sender, session.icon)
+    end
+    -- Only the member list: a CLASS message is always read as the sender's
+    -- own class, and members announce theirs.
+    local others, known = {}, {}
+    for _, member in pairs(session.members) do
+        if not isSelf(member.name) and not namesMatch(member.name, sender) then
+            others[#others + 1] = member.name
+        end
+    end
+    for _, memberName in pairs(session.knownMembers or {}) do
+        known[#known + 1] = memberName
+    end
+    if caps then
+        sendNameList(session, "MEMBERS", sender, others)
+        sendNameList(session, "KNOWNS", sender, known)
+    else
+        for _, memberName in ipairs(others) do
+            sendGroupProtocol(session, "MEMBER", sender, memberName)
+        end
+        for _, memberName in ipairs(known) do
+            sendGroupProtocol(session, "KNOWN", sender, memberName)
+        end
+    end
+    -- Share the removed-member list so the newcomer rejects them too.
+    for _, bannedName in pairs(session.banned or {}) do
+        sendGroupProtocol(session, "BAN", sender, bannedName)
+    end
+    sendToMembers(session, "MEMBER", sender, sender)
+    sendHistoryToMember(session, sender, caps and caps.newest)
+end
+
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("CHAT_MSG_ADDON")
 eventFrame:RegisterEvent("PLAYER_LOGOUT")
@@ -2079,7 +2206,8 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
 
     if kind == "CAPS" then
         local version, newest = string.match(body, "^(%d+):(%d+)$")
-        if version and tonumber(version) >= PROTOCOL_VERSION then
+        -- Version 2 and up read packed lists and want only missing history.
+        if version and tonumber(version) >= 2 then
             capsFrom[id .. "\0" .. normalizeName(sender)] = {
                 newest = tonumber(newest), at = GetTime(),
             }
@@ -2087,75 +2215,94 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
         return
     end
 
+    -- Joining without sending the password (see above). Someone asks: send
+    -- them a challenge. Anyone may ask; nothing is given away by answering.
+    if kind == "AUTH" then
+        local group = session or pending
+        if group and isNonce(body) and not isBanned(group, sender) then
+            local nonceR = newNonce()
+            challenges[id .. "\0" .. characterKey(sender)] = {
+                nonceX = body, nonceR = nonceR, at = GetTime(),
+            }
+            sendGroupProtocol(group, "CHALLENGE", sender, nonceR)
+        end
+        return
+    end
+
+    -- The member you asked sent its challenge: prove you know the password.
+    if kind == "CHALLENGE" then
+        local group = pending or session
+        local auth = group and group.auth and group.auth[characterKey(sender)]
+        if auth and isNonce(body) and GetTime() - auth.at <= AUTH_SECONDS then
+            auth.nonceR = body
+            sendGroupProtocol(group, "PROOF", sender, makeProof(group, "join",
+                selfName or UnitName("player"), auth.nonceX, body))
+        end
+        return
+    end
+
+    -- Their proof checks out: they're in. Two members logging in at the same
+    -- moment each wait to be let in by the other; whoever is proved to first
+    -- lets the other in, so they connect instead of each opening the group
+    -- alone. Someone the creator removed can't just reconnect and rejoin.
+    if kind == "PROOF" then
+        local challengeKey = id .. "\0" .. characterKey(sender)
+        local challenge = challenges[challengeKey]
+        local group = session or pending
+        if challenge and group and GetTime() - challenge.at <= AUTH_SECONDS
+            and not isBanned(group, sender)
+            and body == makeProof(group, "join", sender, challenge.nonceX, challenge.nonceR) then
+            challenges[challengeKey] = nil
+            if not session then
+                completePendingJoin(pending, sender, true)
+                session = activeGroups[id]
+            end
+            answerHello(session, id, sender, makeProof(session, "welcome",
+                selfName or UnitName("player"), challenge.nonceX, challenge.nonceR))
+        end
+        return
+    end
+
+    -- The member you asked proved it knows the password too: from now on
+    -- what it sends about the group counts.
+    if kind == "VOUCH" then
+        local group = pending or session
+        local key = characterKey(sender)
+        local auth = group and group.auth and group.auth[key]
+        if auth and auth.nonceR
+            and body == makeProof(group, "welcome", sender, auth.nonceX, auth.nonceR) then
+            group.vouched = group.vouched or {}
+            group.vouched[key] = GetTime()
+        end
+        return
+    end
+
+    -- Older versions still send the password in their hello, which is
+    -- checked as before. This version never sends it.
     if kind == "HELLO" then
-        -- Two members logging in at the same moment each wait to be let in
-        -- by the other. Whoever hears a hello first lets them in, so the two
-        -- connect to each other instead of each opening the group alone.
         if not session and pending and body == pending.password
             and not isBanned(pending, sender) then
             completePendingJoin(pending, sender, true)
             session = activeGroups[id]
         end
-        -- Someone the creator removed can't just reconnect and rejoin.
         if session and body == session.password and not isBanned(session, sender) then
-            local caps = getCaps(id, sender)
-            addMember(session, sender)
-            if caps then
-                sendCaps(session, sender)
-            end
-            sendGroupProtocol(session, "WELCOME", sender,
-                session.creatorName or (session.isCreator and selfName) or "")
-            greetMember(session, sender)
-            -- Any member passes the icon on, so a newcomer has it even
-            -- while the creator is away.
-            if session.icon and not session.isCreator then
-                sendGroupProtocol(session, "ICON", sender, session.icon)
-            end
-            -- Only the member list: a CLASS message is always read as the
-            -- sender's own class, and members announce theirs.
-            local others, known = {}, {}
-            for _, member in pairs(session.members) do
-                if not isSelf(member.name) and not namesMatch(member.name, sender) then
-                    others[#others + 1] = member.name
-                end
-            end
-            for _, memberName in pairs(session.knownMembers or {}) do
-                known[#known + 1] = memberName
-            end
-            if caps then
-                sendNameList(session, "MEMBERS", sender, others)
-                sendNameList(session, "KNOWNS", sender, known)
-            else
-                for _, memberName in ipairs(others) do
-                    sendGroupProtocol(session, "MEMBER", sender, memberName)
-                end
-                for _, memberName in ipairs(known) do
-                    sendGroupProtocol(session, "KNOWN", sender, memberName)
-                end
-            end
-            -- Share the removed-member list so the newcomer rejects them too.
-            for _, bannedName in pairs(session.banned or {}) do
-                sendGroupProtocol(session, "BAN", sender, bannedName)
-            end
-            sendToMembers(session, "MEMBER", sender, sender)
-            sendHistoryToMember(session, sender, caps and caps.newest)
+            answerHello(session, id, sender)
         end
         return
     end
 
     if kind == "WELCOME" then
-        if pending and isJoinCandidate(pending, sender) then
+        if pending and isTrustedCandidate(pending, sender) then
             if body ~= "" then
                 pending.creatorName = body
                 pending.isCreator = namesMatch(body, selfName)
             end
             completePendingJoin(pending, sender)
         elseif session and not hasMember(session, sender) then
-            -- An answer to looking for members: the two join up.
-            local key = normalizeName(sender)
-            local helloAt = session.helloSentAt and session.helloSentAt[key]
-            if helloAt and GetTime() - helloAt <= HELLO_ANSWER_SECONDS then
-                session.helloSentAt[key] = nil
+            -- An answer to looking for members, from a member that vouched:
+            -- the two join up.
+            if hasVouched(session, sender) then
+                session.vouched[characterKey(sender)] = nil
                 if body ~= "" and not session.creatorName then
                     session.creatorName = body
                 end
@@ -2183,7 +2330,7 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
                 end
             end
             if kind == "KNOWNS" and saveGroup then saveGroup(session) end
-        elseif pending and isJoinCandidate(pending, sender) then
+        elseif pending and isTrustedCandidate(pending, sender) then
             for _, name in ipairs(names) do
                 if kind == "MEMBERS" then
                     addMember(pending, name)
@@ -2208,7 +2355,7 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
             -- showing offline when a whisper to them didn't get through.
             addMember(session, sender)
             greetMember(session, sender)
-        elseif pending and isJoinCandidate(pending, sender) then
+        elseif pending and isTrustedCandidate(pending, sender) then
             if body ~= "" then
                 addMember(pending, body)
             end
@@ -2221,7 +2368,7 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
         if session and hasMember(session, sender) then
             addKnownMember(session, body)
             if saveGroup then saveGroup(session) end
-        elseif pending and isJoinCandidate(pending, sender) then
+        elseif pending and isTrustedCandidate(pending, sender) then
             addKnownMember(pending, body)
         end
         return
@@ -2251,7 +2398,7 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
                     if saveGroup then saveGroup(session) end
                     notifyChange("groups", id)
                 end
-            elseif pending and isJoinCandidate(pending, sender) then
+            elseif pending and isTrustedCandidate(pending, sender) then
                 pending.icon = body
             end
         end
@@ -2314,7 +2461,7 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
                     if saveGroup then saveGroup(session) end
                     notifyChange("groups", id)
                 end
-            elseif pending and isJoinCandidate(pending, sender)
+            elseif pending and isTrustedCandidate(pending, sender)
                 and not (pending.creatorName and namesMatch(target, pending.creatorName)) then
                 addBanned(pending, target)
             end
@@ -2406,7 +2553,7 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
                     notifyHistoryProgress(session)
                 end
             end
-        elseif pending and isJoinCandidate(pending, sender) then
+        elseif pending and isTrustedCandidate(pending, sender) then
             receiveHistoryChunk(pending, sender, body)
         end
         return
@@ -2460,6 +2607,11 @@ C_Timer.NewTicker(MEMBER_UPDATE_INTERVAL, function()
             end
         end
         lookForMembers(session)
+    end
+    for key, challenge in pairs(challenges) do
+        if now - challenge.at > AUTH_SECONDS then
+            challenges[key] = nil
+        end
     end
 end)
 
