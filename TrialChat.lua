@@ -641,7 +641,7 @@ sendTrialChatMessage = function(msg, reply)
     if isSoundEmote then
         if not soundEmote then
             if not soundPlayed and not soundWaiting
-                and TrialChatCommon.IsGameSoundEnabled() then
+                and TrialChatCommon.CanHearSoundEmotes() then
                 showTrialChatNotice("No sound emote found for that command.", true)
             end
             if soundName then

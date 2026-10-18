@@ -1031,14 +1031,20 @@ local function getSoundEmoteDuration(name)
     return duration or TrialChatCommon.SoundEmoteDefaultDuration
 end
 
+-- The sounds of the sound emote playing now, so muting can stop it.
+local playingSoundHandles = {}
+
 -- Starts a sound emote right now and reserves the sound until it is over.
 local function startSoundEmote(name)
     local path = SOUND_EMOTE_DIRECTORY .. TrialChatCommon.GetSoundEmoteFile(name)
     local channels = TrialChatCommon.SoundEmoteChannels or { "Master" }
     local played = false
+    playingSoundHandles = {}
     for _, channel in ipairs(channels) do
-        if PlaySoundFile(path, channel) then
+        local willPlay, handle = PlaySoundFile(path, channel)
+        if willPlay then
             played = true
+            playingSoundHandles[#playingSoundHandles + 1] = handle
         end
     end
     if played then
@@ -1055,7 +1061,7 @@ local function drainSoundEmoteQueue()
         return
     end
     local name = table.remove(soundEmoteQueue, 1)
-    if not name then return end
+    if not name or TrialChatCommon.AreSoundEmotesMuted() then return end
     startSoundEmote(name)
     if soundEmoteQueue[1] then
         scheduleSoundEmoteQueue()
@@ -1079,12 +1085,40 @@ function TrialChatCommon.IsGameSoundEnabled()
     return true
 end
 
+-- "Mute sound emotes" in Options: no sound emote plays, yours or anyone's.
+-- Yours still go out to the players around you, who hear them unless they
+-- muted them too.
+function TrialChatCommon.AreSoundEmotesMuted()
+    return TrialChatDB ~= nil and TrialChatDB.soundEmotesMuted == true
+end
+
+function TrialChatCommon.SetSoundEmotesMuted(muted)
+    TrialChatDB = TrialChatDB or {}
+    TrialChatDB.soundEmotesMuted = muted == true or nil
+    if not muted then return end
+    -- Muting stops the one playing and drops the ones waiting.
+    for _, handle in ipairs(playingSoundHandles) do
+        if StopSound then StopSound(handle) end
+    end
+    playingSoundHandles = {}
+    soundEmoteQueue = {}
+    soundEmoteBusyUntil = 0
+end
+
+-- Whether a sound emote that doesn't play means its file is missing: not
+-- when the game's sound is off or sound emotes are muted.
+function TrialChatCommon.CanHearSoundEmotes()
+    return TrialChatCommon.IsGameSoundEnabled()
+        and not TrialChatCommon.AreSoundEmotesMuted()
+end
+
 -- Plays a sound emote's audio file, after any sound emote that is already
 -- playing. A missing file quietly does not play. Returns whether the sound
 -- started now, and whether one was already playing (then this one is waiting
 -- its turn, or was dropped if too many are queued).
 function TrialChatCommon.PlaySoundEmote(name)
-    if not name or name == "" or not PlaySoundFile then
+    if not name or name == "" or not PlaySoundFile
+        or TrialChatCommon.AreSoundEmotesMuted() then
         return false, false
     end
     if soundEmoteBusyUntil > GetTime() then

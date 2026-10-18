@@ -168,6 +168,11 @@ local function createWindow()
             TrialChatDB.echoToParty = checked and true or false
         end)
 
+    section("Sound emotes")
+    toggle("Mute sound emotes",
+        function() return TrialChatCommon.AreSoundEmotesMuted() end,
+        function(checked) TrialChatCommon.SetSoundEmotesMuted(checked) end)
+
     -- The member list is deliberately NOT listed here: the maximized window
     -- already has its own toggle for it in the sidebar, so don't add one.
 
