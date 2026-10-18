@@ -322,25 +322,39 @@ function View:CreateResizer()
     }) do
         texture:SetTexCoord(0, 1, 1, 0)
     end
-    resizer:SetScript("OnMouseDown", function()
+    resizer:SetScript("OnMouseDown", function(_, button)
+        if button ~= "LeftButton" then return end
         -- The grip resizes only once the mouse actually drags it past a
         -- small threshold, so a plain click on it never changes the chat's
         -- size by accident (see View:StartResizing).
         self.resizePressed = true
         self.resizeStartX, self.resizeStartY = GetCursorPosition()
     end)
+    local function release()
+        self.resizePressed = false
+        self:StopResizing()
+    end
     resizer:SetScript("OnUpdate", function()
-        if not self.resizePressed or self.resizing then return end
+        if not self.resizePressed then return end
+        -- The mouse-up can be missed: the grip hides when the chat goes
+        -- idle, even while it's held. A grip still marked as held would
+        -- otherwise start resizing on the next mouse move, without a click.
+        if not IsMouseButtonDown("LeftButton") then
+            release()
+            return
+        end
+        if self.resizing then return end
         local x, y = GetCursorPosition()
         if math.abs(x - self.resizeStartX) > RESIZE_DRAG_THRESHOLD
             or math.abs(y - self.resizeStartY) > RESIZE_DRAG_THRESHOLD then
             self:StartResizing()
         end
     end)
-    resizer:SetScript("OnMouseUp", function()
-        self.resizePressed = false
-        self:StopResizing()
+    resizer:SetScript("OnMouseUp", function(_, button)
+        if button ~= "LeftButton" then return end
+        release()
     end)
+    resizer:SetScript("OnHide", release)
     resizer:SetScript("OnEnter", function(button)
         GameTooltip:SetOwner(button, "ANCHOR_TOP")
         GameTooltip:SetText("Drag to resize")

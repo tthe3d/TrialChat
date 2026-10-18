@@ -1767,8 +1767,26 @@ local function createWindow()
         resizeGrip.sizing = false
         resizeGrip.startX, resizeGrip.startY = GetCursorPosition()
     end)
+    local function stopResizing()
+        resizeGrip.pressed = false
+        if not resizeGrip.sizing then return end
+        resizeGrip.sizing = false
+        window:StopMovingOrSizing()
+        -- Keep the grip on screen before the size is written down, so the
+        -- next session can't inherit a window that can't be shrunk.
+        fitToScreen()
+        saveWindowSettings()
+    end
     resizeGrip:SetScript("OnUpdate", function()
-        if not resizeGrip.pressed or resizeGrip.sizing then return end
+        if not resizeGrip.pressed then return end
+        -- The mouse-up can be missed (the grip hid while the button was
+        -- held); a grip still marked as held would otherwise resize the
+        -- window on the next mouse move, without any click.
+        if not IsMouseButtonDown("LeftButton") then
+            stopResizing()
+            return
+        end
+        if resizeGrip.sizing then return end
         local x, y = GetCursorPosition()
         if math.abs(x - resizeGrip.startX) > RESIZE_DRAG_THRESHOLD
             or math.abs(y - resizeGrip.startY) > RESIZE_DRAG_THRESHOLD then
@@ -1778,15 +1796,9 @@ local function createWindow()
     end)
     resizeGrip:SetScript("OnMouseUp", function(_, button)
         if button ~= "LeftButton" then return end
-        resizeGrip.pressed = false
-        if not resizeGrip.sizing then return end
-        resizeGrip.sizing = false
-        window:StopMovingOrSizing()
-        -- Keep the grip on screen before the size is written down, so the
-        -- next session can't inherit a window that can't be shrunk.
-        fitToScreen()
-        saveWindowSettings()
+        stopResizing()
     end)
+    resizeGrip:SetScript("OnHide", stopResizing)
 
     -- Resizing the window while the emoji picker is up keeps the picker's
     -- proportions in step with it instead of leaving the panel at its old size.
