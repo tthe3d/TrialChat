@@ -282,8 +282,13 @@ local function showEmojiFrame(icon, entry)
     local count = entry.frames
     local cell = entry.cell or 19
     local frame = TrialChatCommon.EmojiFrame(entry, GetTime())
-    local inset = 0.5 / (count * cell)
-    icon:SetTexCoord((frame - 1) / count + inset, frame / count - inset, 0, 1)
+    -- Most sheets are just the frames; a padded one is larger (see
+    -- TrialChatEmoji.lua), with the frames in its top left corner.
+    local sheetWidth = entry.sheetWidth or count * cell
+    local sheetHeight = entry.sheetHeight or cell
+    local inset = 0.5 / sheetWidth
+    icon:SetTexCoord((frame - 1) * cell / sheetWidth + inset, frame * cell / sheetWidth - inset,
+        0, cell / sheetHeight)
 end
 
 -- Draws an emoticon on a button: animated ones step through their sprite

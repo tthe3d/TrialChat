@@ -89,9 +89,14 @@ TrialChatCommon.EmojiList = {
     { name = "Black sheep", shortcut = "(bah)", file = "black-sheep" },
     { name = "I don't know smile", shortcut = ":^)", file = "i-dont-know-smile", frames = 5, cell = 19 },
     { name = "Thinking smile", shortcut = "*-)", file = "thinking-smile", frames = 4, cell = 19 },
-    { name = "Lightning", shortcut = "(li)", file = "lightning", frames = 6, cell = 19 },
+    -- These two sheets didn't load in the game at 114 by 19 pixels (every other
+    -- size here does), so they are padded to 128 by 32, a size the game always
+    -- loads, with the frames in the top left corner (sheetWidth, sheetHeight).
+    { name = "Lightning", shortcut = "(li)", file = "lightning", frames = 6, cell = 19,
+        sheetWidth = 128, sheetHeight = 32 },
     { name = "Party smile", shortcut = "<:o)", file = "party-smile", frames = 4, cell = 19 },
-    { name = "Eye-rolling smile", shortcut = "8-)", file = "eye-rolling-smile", frames = 6, cell = 19 },
+    { name = "Eye-rolling smile", shortcut = "8-)", file = "eye-rolling-smile", frames = 6, cell = 19,
+        sheetWidth = 128, sheetHeight = 32 },
     { name = "Sleepy smile", shortcut = "|-)", file = "sleepy-smile", frames = 9, cell = 19 },
     { name = "Bunny", shortcut = "('.')", file = "bunny" },
     { name = "Cigarette", shortcut = "(CIG)", file = "cigarette", frames = 5, cell = 19 },
@@ -144,7 +149,7 @@ function TrialChatCommon.EmojiMarkup(entry, frame)
     local right = frame * cell
     return "|T" .. directory .. entry.file .. "-frames.png:"
         .. size .. ":" .. size .. ":0:0:"
-        .. (count * cell) .. ":" .. cell
+        .. (entry.sheetWidth or count * cell) .. ":" .. (entry.sheetHeight or cell)
         .. ":" .. left .. ":" .. right .. ":0:" .. cell .. "|t"
 end
 
