@@ -1358,7 +1358,7 @@ local function ensureMinimal()
         Send = sendWithReply,
         ClearReply = clearReply,
         ShowMessageMenu = showMessageMenu,
-        ShowFullView = function() setMode("full", true) end,
+        ShowFullView = function() setMode("full", true, true) end,
         GetSettings = getSettings,
         AnswerInvite = function(join) Groups:AnswerInvite(join) end,
         OnShown = function()
@@ -1379,26 +1379,108 @@ end
 
 -- "minimal" shows the minimal view instead of the window; anything else is
 -- the full window. Either way it opens on the same conversation.
-setMode = function(mode, focusInput)
+-- Switching between the full window and the minimal view: the one you
+-- leave hides, a panel grows or shrinks from where it was to where the other
+-- one is, and then the other one shows.
+local MORPH_SECONDS = 0.22
+local morph
+
+-- A frame's rectangle in UIParent's coordinates, or nil while it has none.
+local function getScreenRect(frame)
+    local left, bottom, width, height = frame:GetRect()
+    if not (left and bottom and width and height) or width <= 0 or height <= 0 then
+        return nil
+    end
+    local scale = frame:GetEffectiveScale() / UIParent:GetEffectiveScale()
+    return { left * scale, bottom * scale, width * scale, height * scale }
+end
+
+local function placeMorph(rect)
+    morph:ClearAllPoints()
+    morph:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", rect[1], rect[2])
+    morph:SetSize(rect[3], rect[4])
+end
+
+-- A switch already under way finishes at once, so the newest one plays.
+local function finishMorph()
+    if not (morph and morph.done) then return end
+    local done = morph.done
+    morph.done = nil
+    morph:SetScript("OnUpdate", nil)
+    morph:Hide()
+    done()
+end
+
+local function playMorph(fromRect, toRect, done)
+    finishMorph()
+    if not morph then
+        morph = CreateFrame("Frame", nil, UIParent)
+        morph:SetFrameStrata("DIALOG")
+        morph:SetFrameLevel(99)
+        morph.box = UI.CreateBox(morph, { radius = 10, border = true })
+        morph.box:SetColor(Color.window)
+        morph.box:SetBorderColor(Color.outline)
+    end
+    morph.done = done
+    morph.elapsed = 0
+    placeMorph(fromRect)
+    morph:Show()
+    morph:SetScript("OnUpdate", function(self, elapsed)
+        self.elapsed = self.elapsed + elapsed
+        local progress = math.min(1, self.elapsed / MORPH_SECONDS)
+        -- Quick at first, settling gently into place.
+        local eased = 1 - (1 - progress) ^ 3
+        local rect = {}
+        for index = 1, 4 do
+            rect[index] = fromRect[index] + (toRect[index] - fromRect[index]) * eased
+        end
+        placeMorph(rect)
+        if progress >= 1 then
+            finishMorph()
+        end
+    end)
+end
+
+-- animate: the switch was asked for (the window's buttons), so it shows
+-- going from the one to the other; restoring a view as it was doesn't.
+setMode = function(mode, focusInput, animate)
+    finishMorph()
+    local fromFrame = animate and isViewShown()
+        and (inMinimalMode() and minimal and minimal.frame or window) or nil
     getSettings().mode = mode == "minimal" and "minimal" or nil
-    if mode == "minimal" then
-        ensureMinimal()
-        window:Hide()
-        minimal:Show()
-        selectConversation(selected)
-        if focusInput then
-            minimal:FocusInput()
-        end
-    else
-        if minimal then
-            minimal:Hide()
-        end
-        window:Show()
-        selectConversation(selected)
-        if focusInput then
-            composer.input:SetFocus()
+    local function show()
+        if mode == "minimal" then
+            ensureMinimal()
+            window:Hide()
+            minimal:Show()
+            selectConversation(selected)
+            if focusInput then
+                minimal:FocusInput()
+            end
+        else
+            if minimal then
+                minimal:Hide()
+            end
+            window:Show()
+            selectConversation(selected)
+            if focusInput then
+                composer.input:SetFocus()
+            end
         end
     end
+    if not fromFrame then
+        show()
+        return
+    end
+    if mode == "minimal" then ensureMinimal() end
+    local toFrame = mode == "minimal" and minimal.frame or window
+    local fromRect, toRect = getScreenRect(fromFrame), getScreenRect(toFrame)
+    if not fromRect or not toRect or fromFrame == toFrame then
+        show()
+        return
+    end
+    fromFrame:Hide()
+    playMorph(fromRect, toRect, show)
 end
 
 -- Other conversations' messages show as a notice in the minimal view.
@@ -1539,7 +1621,7 @@ local function createHeader()
     header.minimizeButton = UI.CreateButton(main, {
         style = "ghost", icon = "collapse", iconSize = 15, width = 28, height = 28,
         tooltip = "Minimal view",
-        onClick = function() setMode("minimal") end,
+        onClick = function() setMode("minimal", nil, true) end,
     })
     header.minimizeButton:SetPoint("RIGHT", header.closeButton, "LEFT", -2, 0)
 
@@ -2110,6 +2192,7 @@ Whispers:SetChangeHandler(onWhispersChange)
 
 function Messenger:Open(focusInput)
     createWindow()
+    finishMorph()
     if inMinimalMode() then
         ensureMinimal()
         -- Opening to type with a notice showing answers that conversation.
@@ -2131,6 +2214,7 @@ function Messenger:Open(focusInput)
 end
 
 function Messenger:Toggle()
+    finishMorph()
     if not isViewShown() then
         Messenger:Open(true)
     elseif inMinimalMode() then
