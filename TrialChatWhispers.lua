@@ -19,6 +19,9 @@ local namesMatch = TrialChatCommon.NamesMatch
 local MAX_MESSAGE_BYTES = 1000
 local MAX_HISTORY = 500
 local MAX_CONVERSATIONS = 60
+-- Packets of whispers sent to an away player, delivered when they're back
+-- (see SendMessage); a long stay away drops the oldest off the queue.
+local MAX_PENDING_PACKETS = 200
 Whispers.MAX_MESSAGE_BYTES = MAX_MESSAGE_BYTES
 Whispers.MAX_HISTORY = MAX_HISTORY
 
@@ -47,6 +50,7 @@ local PREFIX = "whisper:"
 local conversations -- id -> { id, name, history = { entries } }, loaded lazily
 local changeHandler
 local viewedId
+local flushPending -- defined with the sending code; presence flushes it
 
 local function notifyChange(kind, id, ...)
     if changeHandler then
@@ -78,6 +82,7 @@ local function ensureLoaded()
                 id = id,
                 name = entry.name,
                 history = type(entry.history) == "table" and entry.history or {},
+                pending = type(entry.pending) == "table" and entry.pending or nil,
             }
         end
     end
@@ -88,6 +93,8 @@ local function saveConversation(conversation)
     getSavedWhispers()[conversation.id] = {
         name = conversation.name,
         history = conversation.history,
+        -- Whispers waiting for the player to be back (see SendMessage).
+        pending = conversation.pending,
     }
 end
 
@@ -190,9 +197,13 @@ end
 
 local function updatePresence(conversation)
     local online = isSeenRecently(conversation)
-    if conversation.presenceSeen ~= online then
-        conversation.presenceSeen = online
-        notifyChange("presence", conversation.id)
+    if conversation.presenceSeen == online then return end
+    conversation.presenceSeen = online
+    notifyChange("presence", conversation.id)
+    -- They answer again, so whatever was queued while they were away goes
+    -- out now (see the sending code below).
+    if online then
+        flushPending(conversation)
     end
 end
 
@@ -226,20 +237,53 @@ local function pingConversation(conversation)
     sendPacket(conversation, WHISPER_PING)
 end
 
+-- Sends what was queued while the player was away and forgets it: an
+-- addon message the game can't reach them with is lost, so it waits for
+-- them to answer a presence ping (see updatePresence).
+flushPending = function(conversation)
+    local pending = conversation.pending
+    conversation.pending = nil
+    if not pending or #pending == 0 then return end
+    for index = 1, #pending do
+        sendPacket(conversation, pending[index])
+    end
+    saveConversation(conversation)
+end
+
 -- A reply quote and emoji markup can make a message outgrow one addon
 -- message; then it goes in numbered parts the receiver puts back together,
--- the kind (a message or an emote) riding on each part.
-local function sendBody(conversation, kind, body)
+-- the kind (a message or an emote) riding on each part. The packets are
+-- built before they go out, so a message can also wait in the queue below.
+local function buildPackets(kind, body)
     if #WHISPER_TAG + #kind + 1 + #body <= 255 then
-        sendPacket(conversation, kind .. "|" .. body)
-        return
+        return { kind .. "|" .. body }
     end
     local partId = TrialChatCommon.NewPartId()
     local parts = TrialChatCommon.SplitIntoParts(body, WHISPER_PART_BYTES)
-    for index, part in ipairs(parts) do
-        sendPacket(conversation, "PART|" .. kind .. ":" .. partId .. ":"
-            .. index .. ":" .. #parts .. ":" .. part)
+    local packets = {}
+    for index = 1, #parts do
+        packets[#packets + 1] = "PART|" .. kind .. ":" .. partId .. ":"
+            .. index .. ":" .. #parts .. ":" .. parts[index]
     end
+    return packets
+end
+
+-- Keeps a whisper sent to an away player as its packets, to go out in
+-- order when they answer a ping again (see updatePresence). Kept with the
+-- conversation, so it survives a reload.
+local function queuePending(conversation, packets)
+    local pending = conversation.pending
+    if not pending then
+        pending = {}
+        conversation.pending = pending
+    end
+    for index = 1, #packets do
+        pending[#pending + 1] = packets[index]
+    end
+    while #pending > MAX_PENDING_PACKETS do
+        table.remove(pending, 1)
+    end
+    saveConversation(conversation)
 end
 
 function Whispers:SendMessage(id, message, reply)
@@ -274,10 +318,20 @@ function Whispers:SendMessage(id, message, reply)
 
     -- Pipes would be read back as markup, so they're encoded for the wire;
     -- a reply rides at the front the way it does in a group message.
-    sendBody(conversation, isEmote and "EMOTE" or "MSG",
+    local packets = buildPackets(isEmote and "EMOTE" or "MSG",
         TrialChatCommon.EncodeReplyPrefix(reply)
             .. TrialChatCommon.EncodeMessageMarkup(
                 TrialChatCommon.AddOwnSongLinkOwner(message)))
+    -- The game can only addon-message a player it can see, so a whisper to
+    -- an away player waits in the queue and goes out when they answer a
+    -- ping again (see updatePresence).
+    if isSeenRecently(conversation) then
+        for index = 1, #packets do
+            sendPacket(conversation, packets[index])
+        end
+    else
+        queuePending(conversation, packets)
+    end
 end
 
 -- Keeps presence going. Conversations overdue for a ping get one (a few at a

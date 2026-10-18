@@ -2,7 +2,8 @@
 -- conversation over the game world, fading with age like the chat frames,
 -- a row of conversations and a message box. When another conversation gets
 -- a message, a notice shows in the corner, and an invite to a group shows
--- above the conversations. The full window is a click away.
+-- above the conversations. The little window buttons in the top left corner
+-- close the chat or open the full window.
 TrialChatMinimalView = {}
 local UI = TrialChatUI
 local Color = UI.Color
@@ -13,10 +14,11 @@ local DEFAULT_WIDTH = 520
 local MIN_WIDTH, MAX_WIDTH = 320, 1000
 local DEFAULT_AREA_HEIGHT = 200
 local MIN_AREA_HEIGHT, MAX_AREA_HEIGHT = 60, 600
--- Messages kept to show; as many as fit are on screen. Scrolling back loads
--- older ones from the conversation's history, this many at a time.
-local MAX_LINES = 50
-local LOAD_LINES = 50
+-- Messages kept to show; as many as fit are on screen. The conversation's
+-- whole stored history is loaded with them, like in the full view (it is
+-- capped where it is stored); this is only a backstop for very long
+-- sessions.
+local MAX_LINES = 2000
 -- Lines per mouse wheel notch, and how long it stays scrolled back once
 -- you've stopped using it.
 local SCROLL_LINES = 2
@@ -30,12 +32,23 @@ local LINE_MIN_HEIGHT = 26
 local LINE_RADIUS = 13
 local LINE_VISIBLE_SECONDS = 30
 local LINE_FADE_SECONDS = 4
+-- How far down from the top edge of the message area a line that only
+-- partly fits fades out, by the middle of what is still shown of it (see
+-- UpdateFade).
+local TOP_FADE_HEIGHT = 24
 -- While you aren't using the view, older lines are dimmer (newest first).
 local LINE_ALPHA_BY_AGE = { 1, 1, 0.8, 0.55 }
 local OLDEST_LINE_ALPHA = 0.35
 local PILL_HEIGHT = 26
 local PILL_GAP = 6
 local GRIP_WIDTH = 18
+-- How far the mouse has to drag the resize grip before it resizes at all.
+local RESIZE_DRAG_THRESHOLD = 3
+-- Room kept between the view's edges and the screen's when it is at its
+-- biggest. A frame exactly as large as the screen has only one position it
+-- can be in, so it could never be dragged anywhere; the margin leaves it
+-- room to move, and keeps the resize grip clear of the screen's edge.
+local SCREEN_MARGIN = 64
 local ROW_GAP = 8
 local COMPOSER_HEIGHT = 38
 -- A reply shown above the message box: who and what is being answered.
@@ -56,6 +69,23 @@ local MENU_THEME = {
 -- Room between the panel's edge and what's in it.
 local PADDING = 10
 local PANEL_RADIUS = 13
+-- The panel's outline. The window buttons' field is outlined in the same
+-- colour and alpha, so its curve is one line with the chat box's.
+local PANEL_LINE_ALPHA = 0.08
+-- The little window buttons in their own field in the top left corner,
+-- above the conversations, like a Mac window's: red closes the chat, green
+-- opens the full window. The field is exactly two of the panel's corner
+-- curves tall, so its corners are the chat box's own curve, top left and
+-- bottom right alike. The frame keeps a strip that tall at the top for it
+-- (see UpdateHeight), so the buttons and the conversations never overlap.
+local WINDOW_BUTTON_SIZE = 12
+local WINDOW_BUTTON_GAP = 6
+local CONTROLS_HEIGHT = 2 * PANEL_RADIUS
+local WINDOW_BUTTON_PADDING = (CONTROLS_HEIGHT - WINDOW_BUTTON_SIZE) / 2
+local CONTROLS_WIDTH = WINDOW_BUTTON_SIZE * 2 + WINDOW_BUTTON_GAP
+    + WINDOW_BUTTON_PADDING * 2
+local CLOSE_COLOR = { 1, 0.37, 0.34 }
+local MAXIMIZE_COLOR = { 0.16, 0.78, 0.25 }
 local IDLE_ALPHA = 0.45
 local RECENT_SECONDS = 7
 local UPDATE_SECONDS = 0.1
@@ -94,6 +124,72 @@ local function getReplyHint()
     return "Click to reply"
 end
 
+---------------------------------------------------------------------------
+-- Window buttons
+---------------------------------------------------------------------------
+-- The little window buttons, like a Mac window's traffic lights: red closes
+-- the chat, green opens the full window. They take the mouse where they are
+-- so they can be clicked, but they don't count as using the view (see
+-- IsInUse): reaching for them never lights the chat up and moves it, the
+-- buttons included, out from under the cursor.
+function View:CreateWindowButton(color, icon, tooltip, onClick)
+    local button = CreateFrame("Button", nil, self.controls)
+    button:SetSize(WINDOW_BUTTON_SIZE, WINDOW_BUTTON_SIZE)
+    button.box = UI.CreateBox(button, { radius = WINDOW_BUTTON_SIZE / 2, border = true })
+    button.box:SetColor(color)
+    -- A slightly darker ring around the dot, the way the real ones have.
+    button.box:SetBorderColor({ color[1] * 0.55, color[2] * 0.55, color[3] * 0.55 })
+    -- Full opacity when hovered so the button/field reads as "in focus".
+    button:SetAlpha(1)
+    -- The little symbol only shows while the cursor is on the button.
+    button.glyph = UI.CreateIcon(button, icon, 7, Color.black, "OVERLAY")
+    button.glyph:SetPoint("CENTER")
+    button.glyph:Hide()
+    button:RegisterForClicks("LeftButtonUp")
+    button:SetScript("OnClick", onClick)
+    button:SetScript("OnEnter", function(self)
+        self.glyph:Show()
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText(tooltip, nil, nil, nil, nil, true)
+        GameTooltip:Show()
+    end)
+    button:SetScript("OnLeave", function(self)
+        self.glyph:Hide()
+        GameTooltip_Hide()
+    end)
+    return button
+end
+
+function View:CreateWindowButtons()
+    local controls = CreateFrame("Frame", nil, self.frame)
+    self.controls = controls
+    controls:SetSize(CONTROLS_WIDTH, CONTROLS_HEIGHT)
+    -- Top left corner curves like the chat box; bottom right curves the same,
+    -- while top right and bottom left stay square, as requested.
+    local fieldCorners = {
+        TOPLEFT = true,
+        TOPRIGHT = false,
+        BOTTOMRIGHT = true,
+        BOTTOMLEFT = false,
+    }
+    controls.box = UI.CreateBox(controls, { radius = PANEL_RADIUS, corners = fieldCorners, border = true })
+    controls.box:SetColor(Color.sidebar, 0.85)
+    controls.box:SetBorderColor(Color.white, PANEL_LINE_ALPHA)
+    controls:SetAlpha(1)
+    controls:EnableMouse(true)
+    local close = self:CreateWindowButton(CLOSE_COLOR, "close", "Close chat", function()
+        self:Hide()
+    end)
+    close:SetPoint("TOPLEFT", controls, "TOPLEFT",
+        WINDOW_BUTTON_PADDING, -WINDOW_BUTTON_PADDING)
+    local maximize = self:CreateWindowButton(MAXIMIZE_COLOR, "expand",
+        "Open the full TrialChat window", function()
+            self.controller.ShowFullView()
+        end)
+    maximize:SetPoint("LEFT", close, "RIGHT", WINDOW_BUTTON_GAP, 0)
+    return controls
+end
+
 -- controller gives the view its data and does what it asks:
 -- GetSelected(), Select(key), Cycle(step), GetConversations() (Nearby and
 -- connected groups as { key, name, unread }), GetEntries() (the open
@@ -103,7 +199,7 @@ end
 function TrialChatMinimalView.Create(controller)
     local view = setmetatable({
         controller = controller, lines = {}, chips = {}, pills = {},
-        scroll = 0, newCount = 0,
+        scroll = 0, newCount = 0, hoveredBody = false,
     }, View)
 
     local settings = controller.GetSettings()
@@ -116,7 +212,8 @@ function TrialChatMinimalView.Create(controller)
     frame:SetWidth(view.width + 2 * PADDING)
     frame:SetResizable(true)
     view.chromeHeight = 2 * PADDING + COMPOSER_HEIGHT + ROW_GAP + PILL_HEIGHT
-    frame:SetHeight(view.chromeHeight)
+    -- At rest, until it is first shown and sized for real (see UpdateHeight).
+    view:UpdateHeight()
     frame:SetFrameStrata("MEDIUM")
     frame:SetClampedToScreen(true)
     frame:SetMovable(true)
@@ -130,14 +227,16 @@ function TrialChatMinimalView.Create(controller)
     -- One rounded panel behind it all, fading with the rest.
     view.panel = UI.CreateBox(view.chrome, { radius = PANEL_RADIUS, border = true })
     view.panel:SetColor(Color.sidebar, 0.8)
-    view.panel:SetBorderColor(Color.white, 0.08)
+    view.panel:SetBorderColor(Color.white, PANEL_LINE_ALPHA)
     view:CreateComposer()
-    view.fullButton = UI.CreateButton(view.chrome, {
-        style = "hud", icon = "expand", iconSize = 13, text = "Full view",
-        height = PILL_HEIGHT, radius = 13, font = UI.Font.small,
-        tooltip = "Open the full TrialChat window",
-        onClick = function() controller.ShowFullView() end,
-    })
+    view:CreateWindowButtons()
+    view:CreateMessageArea()
+    -- In the frame's own top left corner, so they ride the corner of the
+    -- chat box whether it is shrunk or grown; the frame keeps a strip above
+    -- the conversations for them (see UpdateHeight). The field stays at full
+    -- opacity when hovered (or always at full while in use via UpdateFade).
+    view.controls:SetPoint("TOPLEFT", frame, "TOPLEFT")
+    view.controls:SetFrameLevel(view.frame:GetFrameLevel() + 20)
     view.grip = UI.CreateButton(view.chrome, {
         style = "ghost", icon = "grip", iconSize = 14, width = GRIP_WIDTH, height = PILL_HEIGHT,
         tooltip = "Drag to move",
@@ -145,10 +244,6 @@ function TrialChatMinimalView.Create(controller)
     view.grip:SetPoint("BOTTOMLEFT", view.composer, "TOPLEFT", 0, ROW_GAP)
     view:DragBy(view.grip)
     view:CreateResizer()
-    -- Full view sits at the top right, just left of the resize grabber. It
-    -- rides above the messages so it stays clickable when they fill the area.
-    view.fullButton:SetPoint("TOPRIGHT", view.resizer, "TOPLEFT", -6, 0)
-    view.fullButton:SetFrameLevel(view.chrome:GetFrameLevel() + 10)
     view.newestButton = UI.CreateButton(frame, {
         style = "hud", icon = "arrowDown", iconSize = 12, text = "Newest",
         height = PILL_HEIGHT, radius = 13, font = UI.Font.small,
@@ -208,7 +303,9 @@ function View:DragBy(region)
     end)
 end
 
--- A grip in the top corner resizes it; the bottom stays where it is.
+-- A grip in the top corner resizes it; the bottom stays where it is, and
+-- the chat shows at its full size while you drag (see IsInUse), so you can
+-- see the space you're giving it.
 function View:CreateResizer()
     local resizer = CreateFrame("Button", nil, self.chrome)
     self.resizer = resizer
@@ -225,8 +322,25 @@ function View:CreateResizer()
     }) do
         texture:SetTexCoord(0, 1, 1, 0)
     end
-    resizer:SetScript("OnMouseDown", function() self:StartResizing() end)
-    resizer:SetScript("OnMouseUp", function() self:StopResizing() end)
+    resizer:SetScript("OnMouseDown", function()
+        -- The grip resizes only once the mouse actually drags it past a
+        -- small threshold, so a plain click on it never changes the chat's
+        -- size by accident (see View:StartResizing).
+        self.resizePressed = true
+        self.resizeStartX, self.resizeStartY = GetCursorPosition()
+    end)
+    resizer:SetScript("OnUpdate", function()
+        if not self.resizePressed or self.resizing then return end
+        local x, y = GetCursorPosition()
+        if math.abs(x - self.resizeStartX) > RESIZE_DRAG_THRESHOLD
+            or math.abs(y - self.resizeStartY) > RESIZE_DRAG_THRESHOLD then
+            self:StartResizing()
+        end
+    end)
+    resizer:SetScript("OnMouseUp", function()
+        self.resizePressed = false
+        self:StopResizing()
+    end)
     resizer:SetScript("OnEnter", function(button)
         GameTooltip:SetOwner(button, "ANCHOR_TOP")
         GameTooltip:SetText("Drag to resize")
@@ -239,12 +353,38 @@ function View:GetLinesBottom()
     return self.chromeHeight - PADDING + ROW_GAP
 end
 
+-- How tall the space the messages get actually is: the full area, except
+-- while the frame's size is held with the mouse on the view, when it is
+-- what the held frame has room for, so the messages stay inside it (see
+-- UpdateHeight).
+function View:GetVisibleHeight()
+    if not self.holdHeight or not self.frameHeight then
+        return self.areaHeight
+    end
+    return math.max(0, math.min(self.areaHeight,
+        self.frameHeight - self:GetLinesBottom() - CONTROLS_HEIGHT - ROW_GAP/2))
+end
+
 function View:StartResizing()
-    self:UpdateHeight(true)
+    self:UpdateHeight()
     self.resizing = true
-    local bottom = self:GetLinesBottom() + PADDING
-    self.frame:SetResizeBounds(MIN_WIDTH + 2 * PADDING, bottom + MIN_AREA_HEIGHT,
-        MAX_WIDTH + 2 * PADDING, bottom + MAX_AREA_HEIGHT)
+    local bottom = self:GetLinesBottom() + CONTROLS_HEIGHT + ROW_GAP/2
+    -- The grip sits in the top right corner, so the bounds are capped to
+    -- the screen minus the margin that keeps the view movable: it can never
+    -- be dragged off the edge, where it couldn't be grabbed to drag it back,
+    -- and it never fills the screen so exactly that it couldn't be moved.
+    local maxWidth = MAX_WIDTH + 2 * PADDING
+    local maxHeight = bottom + MAX_AREA_HEIGHT
+    local minWidth = MIN_WIDTH + 2 * PADDING
+    local minHeight = bottom + MIN_AREA_HEIGHT
+    local parentWidth, parentHeight = UIParent:GetSize()
+    if parentWidth and parentWidth > 0 then
+        maxWidth = math.min(maxWidth, math.max(minWidth, parentWidth - SCREEN_MARGIN))
+    end
+    if parentHeight and parentHeight > 0 then
+        maxHeight = math.min(maxHeight, math.max(minHeight, parentHeight - SCREEN_MARGIN))
+    end
+    self.frame:SetResizeBounds(minWidth, minHeight, maxWidth, maxHeight)
     self.frame:StartSizing("TOPRIGHT")
 end
 
@@ -264,8 +404,11 @@ end
 -- Lays everything out for the frame's new size while it's being resized.
 function View:ApplySize(frameWidth, frameHeight)
     self.width = clamp(math.floor(frameWidth - 2 * PADDING + 0.5), MIN_WIDTH, MAX_WIDTH)
-    self.areaHeight = clamp(math.floor(frameHeight - self:GetLinesBottom() - PADDING + 0.5),
+    self.areaHeight = clamp(math.floor(frameHeight - self:GetLinesBottom() - (CONTROLS_HEIGHT + ROW_GAP/2) + 0.5),
         MIN_AREA_HEIGHT, MAX_AREA_HEIGHT)
+    -- Kept with the frame, so the messages lay out in the size it has now
+    -- (see GetVisibleHeight).
+    self.frameHeight = frameHeight
     self:UpdateConversations()
 end
 
@@ -449,17 +592,21 @@ function View:SetReply(reply)
     self:UpdateConversations()
 end
 
--- While you use it, the panel is the full size you gave it; otherwise it
--- reaches up to the highest message still on screen.
-function View:UpdateHeight(active)
-    if self.resizing then return end
-    local top = self.chromeHeight
-    if active then
-        top = self:GetLinesBottom() + self.areaHeight + PADDING
-    end
+-- The frame reaches up to the top message still on screen, but no higher
+-- than the space the messages get. While the mouse is on the view the size
+-- is held (see UpdateFade): scrolling back, new messages and the cursor
+-- moving over it never change it, and the messages that don't fit are cut
+-- off at the top of the held frame and fade out along it. Only once you
+-- have left it does it follow the messages again, shrinking as they fade
+-- away.
+function View:UpdateHeight()
+    if self.resizing or self.holdHeight then return end
+    local ceiling = self:GetLinesBottom() + self.areaHeight + CONTROLS_HEIGHT + ROW_GAP/2
+    local top = self.chromeHeight + CONTROLS_HEIGHT + ROW_GAP/2
     for _, chip in ipairs(self.chips) do
-        if chip:IsShown() and chip.top and chip.top + PADDING > top then
-            top = chip.top + PADDING
+        local chipTop = chip.top and math.min(chip.top, ceiling)
+        if chip:IsShown() and chipTop and chipTop + CONTROLS_HEIGHT + ROW_GAP/2 > top then
+            top = chipTop + CONTROLS_HEIGHT + ROW_GAP/2
         end
     end
     if self.frameHeight ~= top then
@@ -533,9 +680,25 @@ function View:MakeLine(entry, format, colorFor)
     }
 end
 
+-- The messages live in their own frame over the conversations, cut off at
+-- the top of the space they get: a line too tall to fit shows the part that
+-- fits and is clipped above the edge (see LayoutLines) instead of being
+-- left out, so the space is always filled. Nothing is drawn on top of the
+-- edge to hide the cut: a line cut off there fades out along it instead
+-- (see UpdateFade), so no band is ever painted over the messages.
+function View:CreateMessageArea()
+    local area = CreateFrame("Frame", nil, self.frame)
+    self.messageArea = area
+    area:SetClipsChildren(true)
+    -- Just under the chips (chrome + 5), which ride above it.
+    area:SetFrameLevel(self.chrome:GetFrameLevel() + 4)
+end
+
 function View:CreateChip()
     local view = self
-    local chip = CreateFrame("Frame", nil, self.frame)
+    -- Parented to the message area so a line cut off at its top is clipped
+    -- there (see CreateMessageArea).
+    local chip = CreateFrame("Frame", nil, self.messageArea)
     chip.box = UI.CreateBox(chip, { radius = LINE_RADIUS, border = true })
     chip.box:SetColor(Color.sidebar, 0.85)
     chip.box:SetBorderColor(Color.white, 0.12)
@@ -570,16 +733,27 @@ end
 
 -- The lines stack up from the conversations, the newest at the bottom (or
 -- the one scrolled back to), as many as fit; each background is as wide as
--- its text.
+-- its text. The line at the top is shown even when it only partly fits:
+-- it gets cut off at the top of the message area (see CreateMessageArea)
+-- rather than left out, so the space is always filled.
 function View:LayoutLines()
     local bottom = self:GetLinesBottom()
-    local limit = bottom + self.areaHeight
+    -- The messages get the space the frame has for them, which while the
+    -- size is held (see UpdateHeight) can be less than the full area: they
+    -- are then cut off at the top of the held frame instead of making it
+    -- grow.
+    local areaHeight = self:GetVisibleHeight()
+    local limit = bottom + areaHeight
     local textWidth = self.width - 2 * LINE_PADDING_X
+    -- The messages get their own frame that clips them at the top of the
+    -- space above the conversations, which moves with them.
+    self.messageArea:ClearAllPoints()
+    self.messageArea:SetPoint("BOTTOMLEFT", self.frame, "BOTTOMLEFT", PADDING, bottom)
+    self.messageArea:SetSize(self.width, areaHeight)
     local y = bottom
     local count = #self.lines
     self.scroll = clamp(self.scroll, 0, math.max(0, count - 1))
     local shown = 0
-    self.showsOldest = true
     for rank = 1, count - self.scroll do
         local line = self.lines[count - self.scroll - rank + 1]
         local chip = self.chips[rank] or self:CreateChip()
@@ -589,20 +763,24 @@ function View:LayoutLines()
         chip.text:SetWidth(width)
         local height = math.max(LINE_MIN_HEIGHT,
             math.ceil(chip.text:GetStringHeight()) + 2 * LINE_PADDING_Y)
-        if y + height > limit then
-            self.showsOldest = false
-            break
-        end
+        -- A line starting at or above the top edge would be cut away
+        -- completely, so it is not shown; one cut in part shows what fits
+        -- of it and is the last line shown.
+        if y >= limit then break end
         chip.line = line
         local entry = line.entry
         chip.onReplyJump = (type(entry) == "table" and entry.reply)
             and function() self:JumpToReply(entry) end or nil
         chip:SetSize(math.max(height, width + 2 * LINE_PADDING_X), height)
         chip:ClearAllPoints()
-        chip:SetPoint("BOTTOMLEFT", self.frame, "BOTTOMLEFT", PADDING, y)
+        chip:SetPoint("BOTTOMLEFT", self.messageArea, "BOTTOMLEFT", 0, y - bottom)
+        -- Where the line reaches to, for its fade along the top edge of the
+        -- area (see UpdateFade).
         chip.top = y + height
-        y = chip.top + LINE_GAP
+        chip.height = height
         shown = rank
+        if chip.top > limit then break end
+        y = chip.top + LINE_GAP
     end
     for rank = shown + 1, #self.chips do
         self.chips[rank].line = nil
@@ -625,55 +803,13 @@ function View:UpdateNewestButton()
     button:SetPoint("BOTTOMRIGHT", self.frame, "BOTTOMRIGHT", -PADDING, self:GetLinesBottom())
 end
 
--- Adds the conversation's older messages in front of the lines; false when
--- there are none.
-function View:LoadOlder()
-    local entries, format, colorFor = self.controller.GetEntries()
-    local oldest
-    for _, line in ipairs(self.lines) do
-        if line.entry ~= nil then
-            oldest = line.entry
-            break
-        end
-    end
-    local first = #entries + 1
-    if oldest ~= nil then
-        first = nil
-        for index = #entries, 1, -1 do
-            if entries[index] == oldest then
-                first = index
-                break
-            end
-        end
-    end
-    if not first or first <= 1 then return false end
-
-    local now = GetTime()
-    local lines = {}
-    for index = math.max(1, first - LOAD_LINES), first - 1 do
-        local line = self:MakeLine(entries[index], format, colorFor)
-        if line then
-            line.shownAt = now
-            lines[#lines + 1] = line
-        end
-    end
-    if #lines == 0 then return false end
-    for _, line in ipairs(self.lines) do
-        lines[#lines + 1] = line
-    end
-    self.lines = lines
-    return true
-end
-
--- Scrolls back into older messages (positive) or forward.
+-- Scrolls back into older messages (positive) or forward. The whole stored
+-- history is loaded (see Render), so this is a plain scroll.
 function View:Scroll(lines)
     self.lastInteractionAt = GetTime()
     if lines > 0 then
-        for _ = 1, lines do
-            if self.showsOldest and not self:LoadOlder() then break end
-            self.scroll = self.scroll + 1
-            self:LayoutLines()
-        end
+        self.scroll = self.scroll + lines
+        self:LayoutLines()
         return
     end
     self.scroll = math.max(0, self.scroll + lines)
@@ -689,9 +825,9 @@ function View:ScrollToNewest()
     self:LayoutLines()
 end
 
--- Scrolls back to the message a reply quotes, when it is among the loaded
--- lines. entry is the reply-carrying line's message; the nearest quote
--- before it wins.
+-- Scrolls back to the message a reply quotes; the whole history is loaded
+-- (see Render), like in the full view. entry is the reply-carrying line's
+-- message; the nearest quote before it wins.
 function View:JumpToReply(entry)
     local reply = type(entry) == "table" and entry.reply
     if not reply then return end
@@ -735,14 +871,15 @@ function View:AddLine(line, jumpToNewest)
     self:LayoutLines()
 end
 
--- Shows the newest messages of the open conversation.
+-- Shows the whole stored history of the open conversation, like the full
+-- view; as many lines as fit are on screen (see LayoutLines).
 function View:Render()
     local entries, format, colorFor = self.controller.GetEntries()
     local now = GetTime()
     self.lines = {}
     self.scroll = 0
     self.newCount = 0
-    for index = math.max(1, #entries - MAX_LINES + 1), #entries do
+    for index = 1, #entries do
         local line = self:MakeLine(entries[index], format, colorFor)
         if line then
             line.shownAt = now
@@ -776,31 +913,67 @@ end
 -- Fading
 ---------------------------------------------------------------------------
 function View:IsInUse()
-    if self.resizing or self.input:HasFocus() or self.frame:IsMouseOver() then return true end
-    for _, chip in ipairs(self.chips) do
-        if chip:IsShown() and chip:IsMouseOver() then return true end
+    if self.resizing or self.moving or self.input:HasFocus() then return true end
+    -- The window buttons only keep the chat in use when the cursor reached
+    -- them from the chat itself: hoveredBody remembers whether the last
+    -- update saw the cursor over the chat, and stays as it was while the
+    -- cursor sits on the buttons. Reaching for them from the chat keeps the
+    -- window expanded (so they don't shrink away from the cursor), while
+    -- arriving from outside never grows the chat under the cursor.
+    local overControls = self.controls:IsMouseOver()
+    local overBody = not overControls and self.frame:IsMouseOver()
+    if not overBody then
+        for _, chip in ipairs(self.chips) do
+            if chip:IsShown() and chip:IsMouseOver() then
+                overBody = true
+                break
+            end
+        end
     end
-    return false
+    self.hoveredBody = overBody or (overControls and self.hoveredBody)
+    if overControls then
+        return self.hoveredBody or false
+    end
+    return overBody
 end
 
--- While you hover, type or read back, everything shows. Otherwise the rest
--- fades back and each message fades out a while after it came in, older
--- ones dimmer. Left scrolled back, it returns to the newest after a while.
+-- While you hover, type or read back, everything shows and the size is
+-- held as it is (see the end of this function). Otherwise the rest fades
+-- back, each message fades out a while after it came in, older ones
+-- dimmer, and the frame shrinks back to the messages still on screen (see
+-- UpdateHeight).
 function View:UpdateFade()
     local now = GetTime()
     local inUse = self:IsInUse()
     if inUse then
         self.lastInteractionAt = now
     end
-    if self.scroll > 0 and not inUse
-        and now - (self.lastInteractionAt or now) > SCROLL_RESET_SECONDS then
-        self:ScrollToNewest()
-        return
-    end
     local active = inUse or self.scroll > 0
     local recent = self.lastLineAt and now - self.lastLineAt < RECENT_SECONDS
+    -- Fade the window buttons the same way as the rest when not in use and
+    -- not hovered.
+    if active or recent or self.controls:IsMouseOver() or self.frame:IsMouseOver() then
+        self.controls:SetAlpha(1)
+    else
+        TrialChatCommon.FadeTo(self.controls, IDLE_ALPHA)
+    end
     TrialChatCommon.FadeTo(self.chrome, (active or recent) and 1 or IDLE_ALPHA)
     self.resizer:SetShown(active)
+    -- The first tick of a hover gives the messages the full area back and
+    -- lays them out in it, so the size the frame is then held at covers
+    -- what has just lit up. LayoutLines ends in this function again, and
+    -- that re-entry sees layingOut set and skips this block.
+    if inUse and self.inUseLast ~= true and not self.resizing and not self.layingOut then
+        self.layingOut = true
+        local ceiling = self:GetLinesBottom() + self.areaHeight + CONTROLS_HEIGHT + ROW_GAP/2
+        if self.frameHeight ~= ceiling then
+            self.frameHeight = ceiling
+            self.frame:SetHeight(ceiling)
+        end
+        self:LayoutLines()
+        self.layingOut = false
+    end
+    local limit = self:GetLinesBottom() + self:GetVisibleHeight()
     for rank, chip in ipairs(self.chips) do
         local line = chip.line
         local alpha = 0
@@ -810,10 +983,30 @@ function View:UpdateFade()
             local left = 1 - math.max(0, now - line.shownAt - LINE_VISIBLE_SECONDS) / LINE_FADE_SECONDS
             alpha = math.max(0, left) * (LINE_ALPHA_BY_AGE[rank] or OLDEST_LINE_ALPHA)
         end
+        -- A line cut off at the top of the area fades out along the edge
+        -- itself: it still shows where it enters the fade strip, and is
+        -- completely gone by the top of the area (see CreateMessageArea).
+        -- What is left of it stands for the whole of it, so the middle of
+        -- the rest is where it is half faded.
+        if line and chip.top and chip.height then
+            local low = math.max(chip.top - chip.height, limit - TOP_FADE_HEIGHT)
+            local high = math.min(chip.top, limit)
+            if high > low then
+                local center = (low + high) / 2
+                alpha = alpha * clamp((limit - center) / TOP_FADE_HEIGHT, 0, 1)
+            end
+        end
         chip:SetAlpha(alpha)
         chip:SetShown(alpha > 0)
     end
-    self:UpdateHeight(active)
+    -- The size is held the whole time the mouse is on the view, so nothing
+    -- on it ever moves under the cursor: the first tick of a hover is the
+    -- one that still sizes the frame, for the messages that light up then;
+    -- every tick after holds that size (see UpdateHeight). Leaving it lets
+    -- it follow the messages again as they fade away.
+    self.holdHeight = inUse and self.inUseLast == true
+    self.inUseLast = inUse
+    self:UpdateHeight()
 end
 
 ---------------------------------------------------------------------------
@@ -826,9 +1019,18 @@ function View:FocusInput() self.input:SetFocus() end
 
 function View:RestorePosition()
     local settings = self.controller.GetSettings()
+    local x = tonumber(settings.minimalX) or DEFAULT_X
+    local y = tonumber(settings.minimalY) or DEFAULT_Y
+    -- A saved position can hang off the edge of the screen (or the screen
+    -- can have shrunk since it was saved). The frame is pulled back inside
+    -- it, so the resize grip in the top right corner always stays reachable.
+    local parentWidth, parentHeight = UIParent:GetSize()
+    if parentWidth and parentHeight and parentWidth > 0 and parentHeight > 0 then
+        x = clamp(x, 0, math.max(0, parentWidth - self.frame:GetWidth()))
+        y = clamp(y, 0, math.max(0, parentHeight - self.frame:GetHeight()))
+    end
     self.frame:ClearAllPoints()
-    self.frame:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT",
-        tonumber(settings.minimalX) or DEFAULT_X, tonumber(settings.minimalY) or DEFAULT_Y)
+    self.frame:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", x, y)
 end
 
 function View:SavePosition()

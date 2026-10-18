@@ -2060,8 +2060,12 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
     -- A sound emote someone in the group triggered: only its name travels,
     -- and each member plays their own copy of the same file. No chat line
     -- goes with it for a sound-only emote, so it is heard but not shown.
+    -- The bell that mutes the group's message sound mutes these too; any
+    -- text emote the sound came with still shows.
     if kind == "SOUND" and session and hasMember(session, sender) then
-        TrialChatCommon.PlayReceivedSoundEmote(sender, body)
+        if not session.muted then
+            TrialChatCommon.PlayReceivedSoundEmote(sender, body)
+        end
         return
     end
 

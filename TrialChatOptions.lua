@@ -161,6 +161,12 @@ local function createWindow()
             TrialChatDB = TrialChatDB or {}
             TrialChatDB.echoToSay = checked and true or false
         end)
+    toggle("Echo messages to Party (/p)",
+        function() return TrialChatDB ~= nil and TrialChatDB.echoToParty == true end,
+        function(checked)
+            TrialChatDB = TrialChatDB or {}
+            TrialChatDB.echoToParty = checked and true or false
+        end)
 
     -- The member list is deliberately NOT listed here: the maximized window
     -- already has its own toggle for it in the sidebar, so don't add one.
