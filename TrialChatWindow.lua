@@ -38,6 +38,7 @@ local WINDOW_MENU_THEME = {
     minWidth = 130,
 }
 local CONVERSATION_ROW_HEIGHT = 40
+local CONVERSATION_ROW_GAP = 2
 local MEMBER_ROW_HEIGHT = 26
 local MEMBER_LABEL_HEIGHT = 30
 local IDLE_ALPHA = 0.45
@@ -769,6 +770,41 @@ end
 ---------------------------------------------------------------------------
 -- Conversations
 ---------------------------------------------------------------------------
+-- The order you dragged the conversations into, saved as their keys (see
+-- "Dragging conversations" below). Ones that aren't in it yet (a group or a
+-- whisper that's new since) come after the ones that are, in their usual
+-- order.
+local function sortByUserOrder(elements)
+    local order = getSettings().conversationOrder
+    if type(order) ~= "table" or #order == 0 then return elements end
+    local rank = {}
+    for index, key in ipairs(order) do
+        if rank[key] == nil then rank[key] = index end
+    end
+    local sorted = {}
+    for index, element in ipairs(elements) do
+        sorted[index] = { element = element, rank = rank[element.key], natural = index }
+    end
+    table.sort(sorted, function(left, right)
+        if left.rank and right.rank then return left.rank < right.rank end
+        if left.rank or right.rank then return left.rank ~= nil end
+        return left.natural < right.natural
+    end)
+    for index, item in ipairs(sorted) do
+        elements[index] = item.element
+    end
+    return elements
+end
+
+-- What the list shows now, in order, and whether the search box is
+-- filtering it; the conversation being dragged, and when the last drag
+-- ended (its mouse-up isn't a click).
+local shownConversations = {}
+local listFiltered = false
+local dragging
+local draggedAt
+local dropLine
+
 local function updateConversations()
     local search = strlower(strtrim(searchField:GetText() or ""))
     local function matches(name)
@@ -810,7 +846,9 @@ local function updateConversations()
             }
         end
     end
-    conversationList:SetDataProvider(CreateDataProvider(elements),
+    shownConversations = sortByUserOrder(elements)
+    listFiltered = search ~= ""
+    conversationList:SetDataProvider(CreateDataProvider(shownConversations),
         ScrollBoxConstants.RetainScrollPosition)
     if minimal then
         minimal:UpdateConversations()
@@ -835,7 +873,8 @@ local function getMinimalConversations()
             key = conversation.id, name = conversation.name, unread = conversation.unread,
         }
     end
-    return conversations
+    -- In the order you dragged them into in the full window.
+    return sortByUserOrder(conversations)
 end
 
 local function showConversationMenu(owner, element)
@@ -896,6 +935,8 @@ local function showConversationMenu(owner, element)
 end
 
 local function onConversationClick(row, button)
+    -- Letting go of a dragged conversation isn't a click on it.
+    if draggedAt and GetTime() - draggedAt < 0.2 then return end
     local element = row.element
     if not element then return end
     if button == "RightButton" then
@@ -951,6 +992,80 @@ local function answerGroupPrompt(row, join)
     Groups:AnswerPrompt(element.key, join)
 end
 
+---------------------------------------------------------------------------
+-- Dragging conversations
+---------------------------------------------------------------------------
+-- Drag a conversation up or down the list and let go where the line shows:
+-- the new order is saved, and the minimal view's pills follow it too. While
+-- the search box filters the list there's no whole list to reorder, so a
+-- drag does nothing then.
+
+-- Where the dragged conversation would go: before the row the cursor is
+-- nearest the top of, 1 to one past the last.
+local function getDropIndex()
+    local top = conversationList:GetTop()
+    if not top then return nil end
+    local _, cursorY = GetCursorPosition()
+    cursorY = cursorY / conversationList:GetEffectiveScale()
+    local stride = CONVERSATION_ROW_HEIGHT + CONVERSATION_ROW_GAP
+    local position = top - cursorY + (conversationList:GetDerivedScrollOffset() or 0)
+    local index = math.floor(position / stride + 0.5) + 1
+    return math.max(1, math.min(#shownConversations + 1, index))
+end
+
+local stopConversationDrag
+
+local function updateDropLine()
+    -- The mouse-up can be missed (the row was reused for another
+    -- conversation mid-drag); the drag ends when the button is up.
+    if not IsMouseButtonDown("LeftButton") then
+        stopConversationDrag()
+        return
+    end
+    local index = getDropIndex()
+    if not index then return end
+    local stride = CONVERSATION_ROW_HEIGHT + CONVERSATION_ROW_GAP
+    local y = (index - 1) * stride - (conversationList:GetDerivedScrollOffset() or 0)
+        - CONVERSATION_ROW_GAP / 2
+    dropLine:ClearAllPoints()
+    dropLine:SetPoint("TOPLEFT", conversationList, "TOPLEFT", 6, -y + 1)
+    dropLine:SetPoint("TOPRIGHT", conversationList, "TOPRIGHT", -6, -y + 1)
+    dropLine:Show()
+end
+
+local function startConversationDrag(row)
+    local element = row.element
+    if listFiltered or not element or dragging then return end
+    dragging = element.key
+    row:SetAlpha(0.5)
+    updateDropLine()
+    dropLine:SetScript("OnUpdate", updateDropLine)
+end
+
+stopConversationDrag = function()
+    if not dragging then return end
+    local key = dragging
+    dragging = nil
+    draggedAt = GetTime()
+    dropLine:SetScript("OnUpdate", nil)
+    dropLine:Hide()
+    local index = getDropIndex()
+    local keys, from = {}, nil
+    for position, element in ipairs(shownConversations) do
+        keys[position] = element.key
+        if element.key == key then from = position end
+    end
+    if from and index then
+        if index > from then index = index - 1 end
+        if index ~= from then
+            table.remove(keys, from)
+            table.insert(keys, index, key)
+            getSettings().conversationOrder = keys
+        end
+    end
+    updateConversations()
+end
+
 local function initConversationRow(row, element)
     if not row.tile then
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
@@ -991,10 +1106,14 @@ local function initConversationRow(row, element)
         row:SetScript("OnClick", onConversationClick)
         row:SetScript("OnEnter", onConversationEnter)
         row:SetScript("OnLeave", onConversationLeave)
+        row:RegisterForDrag("LeftButton")
+        row:SetScript("OnDragStart", startConversationDrag)
+        row:SetScript("OnDragStop", stopConversationDrag)
     end
 
     -- Rows are reused for other conversations when the list changes.
     row.element = element
+    row:SetAlpha(dragging == element.key and 0.5 or 1)
     row.hovered = row:IsMouseOver()
     local isSelected = element.key == selected
     local online = element.state == "online"
@@ -1239,7 +1358,7 @@ local function ensureMinimal()
         Send = sendWithReply,
         ClearReply = clearReply,
         ShowMessageMenu = showMessageMenu,
-        ShowFullView = function() setMode("full", true) end,
+        ShowFullView = function() setMode("full", true, true) end,
         GetSettings = getSettings,
         AnswerInvite = function(join) Groups:AnswerInvite(join) end,
         OnShown = function()
@@ -1260,26 +1379,108 @@ end
 
 -- "minimal" shows the minimal view instead of the window; anything else is
 -- the full window. Either way it opens on the same conversation.
-setMode = function(mode, focusInput)
+-- Switching between the full window and the minimal view: the one you
+-- leave hides, a panel grows or shrinks from where it was to where the other
+-- one is, and then the other one shows.
+local MORPH_SECONDS = 0.22
+local morph
+
+-- A frame's rectangle in UIParent's coordinates, or nil while it has none.
+local function getScreenRect(frame)
+    local left, bottom, width, height = frame:GetRect()
+    if not (left and bottom and width and height) or width <= 0 or height <= 0 then
+        return nil
+    end
+    local scale = frame:GetEffectiveScale() / UIParent:GetEffectiveScale()
+    return { left * scale, bottom * scale, width * scale, height * scale }
+end
+
+local function placeMorph(rect)
+    morph:ClearAllPoints()
+    morph:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", rect[1], rect[2])
+    morph:SetSize(rect[3], rect[4])
+end
+
+-- A switch already under way finishes at once, so the newest one plays.
+local function finishMorph()
+    if not (morph and morph.done) then return end
+    local done = morph.done
+    morph.done = nil
+    morph:SetScript("OnUpdate", nil)
+    morph:Hide()
+    done()
+end
+
+local function playMorph(fromRect, toRect, done)
+    finishMorph()
+    if not morph then
+        morph = CreateFrame("Frame", nil, UIParent)
+        morph:SetFrameStrata("DIALOG")
+        morph:SetFrameLevel(99)
+        morph.box = UI.CreateBox(morph, { radius = 10, border = true })
+        morph.box:SetColor(Color.window)
+        morph.box:SetBorderColor(Color.outline)
+    end
+    morph.done = done
+    morph.elapsed = 0
+    placeMorph(fromRect)
+    morph:Show()
+    morph:SetScript("OnUpdate", function(self, elapsed)
+        self.elapsed = self.elapsed + elapsed
+        local progress = math.min(1, self.elapsed / MORPH_SECONDS)
+        -- Quick at first, settling gently into place.
+        local eased = 1 - (1 - progress) ^ 3
+        local rect = {}
+        for index = 1, 4 do
+            rect[index] = fromRect[index] + (toRect[index] - fromRect[index]) * eased
+        end
+        placeMorph(rect)
+        if progress >= 1 then
+            finishMorph()
+        end
+    end)
+end
+
+-- animate: the switch was asked for (the window's buttons), so it shows
+-- going from the one to the other; restoring a view as it was doesn't.
+setMode = function(mode, focusInput, animate)
+    finishMorph()
+    local fromFrame = animate and isViewShown()
+        and (inMinimalMode() and minimal and minimal.frame or window) or nil
     getSettings().mode = mode == "minimal" and "minimal" or nil
-    if mode == "minimal" then
-        ensureMinimal()
-        window:Hide()
-        minimal:Show()
-        selectConversation(selected)
-        if focusInput then
-            minimal:FocusInput()
-        end
-    else
-        if minimal then
-            minimal:Hide()
-        end
-        window:Show()
-        selectConversation(selected)
-        if focusInput then
-            composer.input:SetFocus()
+    local function show()
+        if mode == "minimal" then
+            ensureMinimal()
+            window:Hide()
+            minimal:Show()
+            selectConversation(selected)
+            if focusInput then
+                minimal:FocusInput()
+            end
+        else
+            if minimal then
+                minimal:Hide()
+            end
+            window:Show()
+            selectConversation(selected)
+            if focusInput then
+                composer.input:SetFocus()
+            end
         end
     end
+    if not fromFrame then
+        show()
+        return
+    end
+    if mode == "minimal" then ensureMinimal() end
+    local toFrame = mode == "minimal" and minimal.frame or window
+    local fromRect, toRect = getScreenRect(fromFrame), getScreenRect(toFrame)
+    if not fromRect or not toRect or fromFrame == toFrame then
+        show()
+        return
+    end
+    fromFrame:Hide()
+    playMorph(fromRect, toRect, show)
 end
 
 -- Other conversations' messages show as a notice in the minimal view.
@@ -1354,10 +1555,18 @@ local function createSidebar()
     conversationList = CreateFrame("Frame", nil, sidebar, "WowScrollBoxList")
     conversationList:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 8, -112)
     conversationList:SetPoint("BOTTOMRIGHT", sidebar, "BOTTOMRIGHT", -8, 60)
-    local view = CreateScrollBoxListLinearView(0, 0, 0, 0, 2)
+    local view = CreateScrollBoxListLinearView(0, 0, 0, 0, CONVERSATION_ROW_GAP)
     view:SetElementInitializer("Button", initConversationRow)
     view:SetElementExtent(CONVERSATION_ROW_HEIGHT)
     conversationList:Init(view)
+    -- Where a dragged conversation will land: a line between the rows,
+    -- above them.
+    dropLine = CreateFrame("Frame", nil, conversationList)
+    dropLine:SetHeight(2)
+    dropLine:SetFrameLevel(conversationList:GetFrameLevel() + 50)
+    dropLine.line = UI.CreateLine(dropLine, Color.accent, "OVERLAY")
+    dropLine.line:SetAllPoints()
+    dropLine:Hide()
 
     local createButton = UI.CreateButton(sidebar, {
         style = "dashed", icon = "plus", iconSize = 15, text = "Create or join a group",
@@ -1412,7 +1621,7 @@ local function createHeader()
     header.minimizeButton = UI.CreateButton(main, {
         style = "ghost", icon = "collapse", iconSize = 15, width = 28, height = 28,
         tooltip = "Minimal view",
-        onClick = function() setMode("minimal") end,
+        onClick = function() setMode("minimal", nil, true) end,
     })
     header.minimizeButton:SetPoint("RIGHT", header.closeButton, "LEFT", -2, 0)
 
@@ -1767,8 +1976,26 @@ local function createWindow()
         resizeGrip.sizing = false
         resizeGrip.startX, resizeGrip.startY = GetCursorPosition()
     end)
+    local function stopResizing()
+        resizeGrip.pressed = false
+        if not resizeGrip.sizing then return end
+        resizeGrip.sizing = false
+        window:StopMovingOrSizing()
+        -- Keep the grip on screen before the size is written down, so the
+        -- next session can't inherit a window that can't be shrunk.
+        fitToScreen()
+        saveWindowSettings()
+    end
     resizeGrip:SetScript("OnUpdate", function()
-        if not resizeGrip.pressed or resizeGrip.sizing then return end
+        if not resizeGrip.pressed then return end
+        -- The mouse-up can be missed (the grip hid while the button was
+        -- held); a grip still marked as held would otherwise resize the
+        -- window on the next mouse move, without any click.
+        if not IsMouseButtonDown("LeftButton") then
+            stopResizing()
+            return
+        end
+        if resizeGrip.sizing then return end
         local x, y = GetCursorPosition()
         if math.abs(x - resizeGrip.startX) > RESIZE_DRAG_THRESHOLD
             or math.abs(y - resizeGrip.startY) > RESIZE_DRAG_THRESHOLD then
@@ -1778,15 +2005,9 @@ local function createWindow()
     end)
     resizeGrip:SetScript("OnMouseUp", function(_, button)
         if button ~= "LeftButton" then return end
-        resizeGrip.pressed = false
-        if not resizeGrip.sizing then return end
-        resizeGrip.sizing = false
-        window:StopMovingOrSizing()
-        -- Keep the grip on screen before the size is written down, so the
-        -- next session can't inherit a window that can't be shrunk.
-        fitToScreen()
-        saveWindowSettings()
+        stopResizing()
     end)
+    resizeGrip:SetScript("OnHide", stopResizing)
 
     -- Resizing the window while the emoji picker is up keeps the picker's
     -- proportions in step with it instead of leaving the panel at its old size.
@@ -1971,6 +2192,7 @@ Whispers:SetChangeHandler(onWhispersChange)
 
 function Messenger:Open(focusInput)
     createWindow()
+    finishMorph()
     if inMinimalMode() then
         ensureMinimal()
         -- Opening to type with a notice showing answers that conversation.
@@ -1992,6 +2214,7 @@ function Messenger:Open(focusInput)
 end
 
 function Messenger:Toggle()
+    finishMorph()
     if not isViewShown() then
         Messenger:Open(true)
     elseif inMinimalMode() then

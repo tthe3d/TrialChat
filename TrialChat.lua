@@ -348,17 +348,26 @@ local function createMinimapButton()
     minimapButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     minimapButton:RegisterForDrag("LeftButton")
 
+    -- Laid out like other minimap buttons: a round backdrop with the icon
+    -- centred on it, inside the tracking ring. The ring's circle sits in the
+    -- top left of its texture, and at 50 pixels it lines up with the button's
+    -- centre.
+    local background = minimapButton:CreateTexture(nil, "BACKGROUND")
+    background:SetSize(24, 24)
+    background:SetPoint("CENTER")
+    background:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
+
     minimapButton.icon = minimapButton:CreateTexture(nil, "ARTWORK")
-    minimapButton.icon:SetSize(17, 17)
-    minimapButton.icon:SetPoint("TOPLEFT", minimapButton, "TOPLEFT", 7, -6)
+    minimapButton.icon:SetSize(18, 18)
+    minimapButton.icon:SetPoint("CENTER")
     minimapButton.icon:SetTexture("Interface\\AddOns\\TrialChat\\broke.tga")
-    minimapButton.icon:SetTexCoord(0, 1, 0, 1)
     minimapButton:SetScript("OnEnter", showMinimapTooltip)
 
     local border = minimapButton:CreateTexture(nil, "OVERLAY")
-    border:SetSize(53, 53)
-    border:SetPoint("TOPLEFT", minimapButton, "TOPLEFT", 0, 0)
+    border:SetSize(50, 50)
+    border:SetPoint("TOPLEFT")
     border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    minimapButton:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
 
     minimapButton:SetScript("OnClick", function(self, mouseButton)
         if mouseButton == "RightButton" then
@@ -632,7 +641,7 @@ sendTrialChatMessage = function(msg, reply)
     if isSoundEmote then
         if not soundEmote then
             if not soundPlayed and not soundWaiting
-                and TrialChatCommon.IsGameSoundEnabled() then
+                and TrialChatCommon.CanHearSoundEmotes() then
                 showTrialChatNotice("No sound emote found for that command.", true)
             end
             if soundName then
