@@ -198,19 +198,58 @@ function UI.CreateBox(owner, options)
     box.fill[#box.fill + 1] = middle
 
     if options.border then
+        local corners = options.corners or ALL_CORNERS
         for point, coords in pairs(CORNER_COORDS) do
-            local ring = addPart(box, layer, subLevel + 1, MEDIA .. (RING_TEXTURES[radius] or "ring.tga"))
-            ring:SetTexCoord(coords[1], coords[2], coords[3], coords[4])
-            ring:SetSize(radius, radius)
-            ring:SetPoint(point, region, point)
-            box.borderParts[#box.borderParts + 1] = ring
+            if corners[point] then
+                local ring = addPart(box, layer, subLevel + 1, MEDIA .. (RING_TEXTURES[radius] or "ring.tga"))
+                ring:SetTexCoord(coords[1], coords[2], coords[3], coords[4])
+                ring:SetSize(radius, radius)
+                ring:SetPoint(point, region, point)
+                box.borderParts[#box.borderParts + 1] = ring
+            end
         end
-        local edges = {
-            { "TOPLEFT", radius, 0, "TOPRIGHT", -radius, 0, nil, 1 },
-            { "BOTTOMLEFT", radius, 0, "BOTTOMRIGHT", -radius, 0, nil, 1 },
-            { "TOPLEFT", 0, -radius, "BOTTOMLEFT", 0, radius, 1, nil },
-            { "TOPRIGHT", 0, -radius, "BOTTOMRIGHT", 0, radius, 1, nil },
-        }
+        local edges = {}
+        local c = options.corners or ALL_CORNERS
+        -- Top edge
+        if c.TOPLEFT and c.TOPRIGHT then
+            edges[#edges + 1] = { "TOPLEFT", radius, 0, "TOPRIGHT", -radius, 0, nil, 1 }
+        elseif c.TOPLEFT and not c.TOPRIGHT then
+            edges[#edges + 1] = { "TOPLEFT", radius, 0, "TOPRIGHT", 0, 0, nil, 1 }
+        elseif not c.TOPLEFT and c.TOPRIGHT then
+            edges[#edges + 1] = { "TOPLEFT", 0, 0, "TOPRIGHT", -radius, 0, nil, 1 }
+        else
+            edges[#edges + 1] = { "TOPLEFT", 0, 0, "TOPRIGHT", 0, 0, nil, 1 }
+        end
+        -- Bottom edge
+        if c.BOTTOMLEFT and c.BOTTOMRIGHT then
+            edges[#edges + 1] = { "BOTTOMLEFT", radius, 0, "BOTTOMRIGHT", -radius, 0, nil, 1 }
+        elseif c.BOTTOMLEFT and not c.BOTTOMRIGHT then
+            edges[#edges + 1] = { "BOTTOMLEFT", radius, 0, "BOTTOMRIGHT", 0, 0, nil, 1 }
+        elseif not c.BOTTOMLEFT and c.BOTTOMRIGHT then
+            edges[#edges + 1] = { "BOTTOMLEFT", 0, 0, "BOTTOMRIGHT", -radius, 0, nil, 1 }
+        else
+            edges[#edges + 1] = { "BOTTOMLEFT", 0, 0, "BOTTOMRIGHT", 0, 0, nil, 1 }
+        end
+        -- Left edge
+        if c.TOPLEFT and c.BOTTOMLEFT then
+            edges[#edges + 1] = { "TOPLEFT", 0, -radius, "BOTTOMLEFT", 0, radius, 1, nil }
+        elseif c.TOPLEFT and not c.BOTTOMLEFT then
+            edges[#edges + 1] = { "TOPLEFT", 0, -radius, "BOTTOMLEFT", 0, 0, 1, nil }
+        elseif not c.TOPLEFT and c.BOTTOMLEFT then
+            edges[#edges + 1] = { "TOPLEFT", 0, 0, "BOTTOMLEFT", 0, radius, 1, nil }
+        else
+            edges[#edges + 1] = { "TOPLEFT", 0, 0, "BOTTOMLEFT", 0, 0, 1, nil }
+        end
+        -- Right edge
+        if c.TOPRIGHT and c.BOTTOMRIGHT then
+            edges[#edges + 1] = { "TOPRIGHT", 0, -radius, "BOTTOMRIGHT", 0, radius, 1, nil }
+        elseif c.TOPRIGHT and not c.BOTTOMRIGHT then
+            edges[#edges + 1] = { "TOPRIGHT", 0, -radius, "BOTTOMRIGHT", 0, 0, 1, nil }
+        elseif not c.TOPRIGHT and c.BOTTOMRIGHT then
+            edges[#edges + 1] = { "TOPRIGHT", 0, 0, "BOTTOMRIGHT", 0, radius, 1, nil }
+        else
+            edges[#edges + 1] = { "TOPRIGHT", 0, 0, "BOTTOMRIGHT", 0, 0, 1, nil }
+        end
         for _, edge in ipairs(edges) do
             local line = addPart(box, layer, subLevel + 1)
             line:SetPoint(edge[1], region, edge[1], edge[2], edge[3])

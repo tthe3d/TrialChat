@@ -12,6 +12,11 @@ local DEFAULT_HEIGHT = 540
 -- Size limits of the window without the member list, which adds its width.
 local MIN_WIDTH, MIN_HEIGHT = 460, 400
 local MAX_WIDTH, MAX_HEIGHT = 1420, 1100
+-- Room kept between the window's edges and the screen's when it is at its
+-- biggest. A window exactly as large as the screen has only one position it
+-- can be in, so it could never be dragged anywhere; the margin leaves it
+-- room to move, and keeps the resize grip clear of the screen's edge.
+local SCREEN_MARGIN = 64
 local SIDEBAR_WIDTH = 200
 local MEMBERS_WIDTH = 180
 local HEADER_HEIGHT = 60
@@ -128,6 +133,36 @@ local function saveWindowSettings()
     settings.height = window:GetHeight()
     settings.centerX = centerX / parentWidth
     settings.centerY = centerY / parentHeight
+end
+
+-- The resize grip sits in the window's bottom right corner, so that corner
+-- is the one that has to stay on screen: a window hanging off the bottom or
+-- the right leaves the grip out of reach with no way to shrink it back.
+-- Only as much of the window is moved as that needs -- the top and the left
+-- may hang off the edge as they please -- so resizing never throws the
+-- window somewhere else while it is being used. With keepTop (at load), the
+-- top is kept on screen too, so the header with its buttons never opens
+-- cut off.
+local function fitToScreen(keepTop)
+    if not window then return end
+
+    local parentWidth, parentHeight = UIParent:GetSize()
+    if parentWidth <= 0 or parentHeight <= 0 then return end
+
+    local left, bottom = window:GetLeft(), window:GetBottom()
+    if not left or not bottom then return end
+
+    -- Pulled in from the right edge and up from the bottom, no further.
+    -- The anchor is BOTTOMLEFT to BOTTOMLEFT on purpose: the offsets below
+    -- are the window's own left and bottom edges, so anchoring its top
+    -- here instead would drop the whole window by its height.
+    local newLeft = math.min(left, parentWidth - window:GetWidth())
+    local newBottom = math.max(bottom, 0)
+    if keepTop then
+        newBottom = math.min(newBottom, parentHeight - window:GetHeight())
+    end
+    window:ClearAllPoints()
+    window:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", newLeft, newBottom)
 end
 
 -- The window fades back while you're not using it, like the chat frames,
@@ -1033,7 +1068,25 @@ end
 
 local function getWidthBounds()
     local extra = getSettings().membersShown and MEMBERS_WIDTH or 0
-    return MIN_WIDTH + extra, MAX_WIDTH + extra
+    local minWidth = MIN_WIDTH + extra
+    local maxWidth = MAX_WIDTH + extra
+    -- No screen can show a window wider than itself: the bounds are capped
+    -- to the screen, minus the margin that keeps the window movable and its
+    -- resize grip within reach.
+    local screenWidth = UIParent:GetWidth()
+    if screenWidth and screenWidth > 0 then
+        maxWidth = math.min(maxWidth, math.max(minWidth, screenWidth - SCREEN_MARGIN))
+    end
+    return minWidth, maxWidth
+end
+
+local function getHeightBounds()
+    local minHeight, maxHeight = MIN_HEIGHT, MAX_HEIGHT
+    local screenHeight = UIParent:GetHeight()
+    if screenHeight and screenHeight > 0 then
+        maxHeight = math.min(maxHeight, math.max(minHeight, screenHeight - SCREEN_MARGIN))
+    end
+    return minHeight, maxHeight
 end
 
 -- The member list adds to the window instead of taking its width from the
@@ -1043,13 +1096,17 @@ local function setMembersShown(shown)
     getSettings().membersShown = shown
     local left, top = window:GetLeft(), window:GetTop()
     local minWidth, maxWidth = getWidthBounds()
+    local minHeight, maxHeight = getHeightBounds()
     local width = window:GetWidth() + (shown and MEMBERS_WIDTH or -MEMBERS_WIDTH)
-    window:SetResizeBounds(minWidth, MIN_HEIGHT, maxWidth, MAX_HEIGHT)
+    window:SetResizeBounds(minWidth, minHeight, maxWidth, maxHeight)
     if left and top then
         window:ClearAllPoints()
         window:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
     end
     window:SetWidth(math.max(minWidth, math.min(maxWidth, width)))
+    -- Growing to the right can push the grip past the screen edge; pull the
+    -- window in from the right just enough for it to stay grabbable.
+    fitToScreen()
     updateLayout()
     saveWindowSettings()
 end
@@ -1585,16 +1642,17 @@ local function createWindow()
     TrialChatDB.chatWindow = nil
     window = CreateFrame("Frame", "TrialChatWindow", UIParent)
     local minWidth, maxWidth = getWidthBounds()
+    local minHeight, maxHeight = getHeightBounds()
     local width = math.max(minWidth, math.min(maxWidth,
         tonumber(settings.width) or DEFAULT_WIDTH))
-    local height = math.max(MIN_HEIGHT, math.min(MAX_HEIGHT,
+    local height = math.max(minHeight, math.min(maxHeight,
         tonumber(settings.height) or DEFAULT_HEIGHT))
     window:SetSize(width, height)
     window:SetFrameStrata("DIALOG")
     window:SetFrameLevel(100)
     window:SetMovable(true)
     window:SetResizable(true)
-    window:SetResizeBounds(minWidth, MIN_HEIGHT, maxWidth, MAX_HEIGHT)
+    window:SetResizeBounds(minWidth, minHeight, maxWidth, maxHeight)
     window:SetClampedToScreen(true)
     local centerX, centerY = tonumber(settings.centerX), tonumber(settings.centerY)
     if centerX and centerY then
@@ -1604,13 +1662,31 @@ local function createWindow()
     else
         window:SetPoint("CENTER")
     end
+    -- A saved position can hang off the edge (or a screen can have shrunk
+    -- since it was saved); the window comes back inside it, so the resize
+    -- grip is never out of reach and it opens with its header visible.
+    fitToScreen(true)
     window:EnableMouse(true)
     window:RegisterForDrag("LeftButton")
     window:SetScript("OnDragStart", function(self)
+        -- A window as large as (or larger than) the screen has nowhere to
+        -- move: that is what pins a maximized window in place. The bounds
+        -- are recomputed here rather than trusted from login, because the
+        -- screen (or the UI scale) can have changed since, and the window
+        -- is pulled back into them before the drag starts. Smaller than the
+        -- screen, the game's own clamping lets it be dragged anywhere on it.
+        local minWidth, maxWidth = getWidthBounds()
+        local minHeight, maxHeight = getHeightBounds()
+        self:SetResizeBounds(minWidth, minHeight, maxWidth, maxHeight)
+        self:SetSize(math.max(minWidth, math.min(maxWidth, self:GetWidth())),
+            math.max(minHeight, math.min(maxHeight, self:GetHeight())))
         self:StartMoving()
     end)
     window:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
+        -- Nothing pulls the window here: while it was being dragged the game
+        -- kept it on screen, and it can't be too big to move (see
+        -- OnDragStart), so it stays exactly where it was let go.
         saveWindowSettings()
     end)
     window.box = UI.CreateBox(window, { radius = 10, border = true })
@@ -1643,16 +1719,37 @@ local function createWindow()
     resizeGrip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
     resizeGrip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
     resizeGrip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+    -- The grip resizes only once the mouse actually drags it past a small
+    -- threshold: a plain click on it does nothing, so it can never nudge the
+    -- window's size (or its saved size) by accident.
+    local RESIZE_DRAG_THRESHOLD = 3
     resizeGrip:SetScript("OnMouseDown", function(_, button)
-        if button == "LeftButton" then
+        if button ~= "LeftButton" then return end
+        resizeGrip.pressed = true
+        -- A drag that was interrupted (say, the window closing mid-drag)
+        -- never got its mouse up; start clean so the grip still works.
+        resizeGrip.sizing = false
+        resizeGrip.startX, resizeGrip.startY = GetCursorPosition()
+    end)
+    resizeGrip:SetScript("OnUpdate", function()
+        if not resizeGrip.pressed or resizeGrip.sizing then return end
+        local x, y = GetCursorPosition()
+        if math.abs(x - resizeGrip.startX) > RESIZE_DRAG_THRESHOLD
+            or math.abs(y - resizeGrip.startY) > RESIZE_DRAG_THRESHOLD then
+            resizeGrip.sizing = true
             window:StartSizing("BOTTOMRIGHT")
         end
     end)
     resizeGrip:SetScript("OnMouseUp", function(_, button)
-        if button == "LeftButton" then
-            window:StopMovingOrSizing()
-            saveWindowSettings()
-        end
+        if button ~= "LeftButton" then return end
+        resizeGrip.pressed = false
+        if not resizeGrip.sizing then return end
+        resizeGrip.sizing = false
+        window:StopMovingOrSizing()
+        -- Keep the grip on screen before the size is written down, so the
+        -- next session can't inherit a window that can't be shrunk.
+        fitToScreen()
+        saveWindowSettings()
     end)
 
     -- Resizing the window while the emoji picker is up keeps the picker's
