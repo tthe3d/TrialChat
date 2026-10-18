@@ -29,6 +29,10 @@ local activeListeners = {}
 local incomingParts = TrialChatCommon.NewPartCollector()
 local lastPingAt = {}
 local pendingPings = {}
+-- When each player was last seen nearby (their nameplate), by character.
+local seenNearbyAt = {}
+local NEARBY_SEEN_SECONDS = 10
+local nameplateHintShown = false
 local pendingIncomingMessages = {}
 local recentIncomingMessages = {}
 local INCOMING_MESSAGE_DEDUP_SECONDS = 1
@@ -169,6 +173,21 @@ end
 
 local isSelf = TrialChatCommon.IsSelf
 
+-- Whether a player may hear your nearby chat: someone you can see near you
+-- (their nameplate showed in the last few seconds), someone in your group,
+-- or a listener you saved yourself. Anyone else could otherwise add
+-- themselves from anywhere in the world just by sending a PING.
+local isGroupMemberName
+
+local function mayListen(name)
+    local key = normalizeCharacterName(name)
+    if not key then return false end
+    local seenAt = seenNearbyAt[key]
+    if seenAt and GetTime() - seenAt <= NEARBY_SEEN_SECONDS then return true end
+    if findPermanentListenerKey(name) then return true end
+    return isGroupMemberName(name)
+end
+
 local function getGroupMembers()
     local members = {}
     local count = IsInRaid() and 40 or 4
@@ -184,6 +203,32 @@ local function getGroupMembers()
     end
 
     return members
+end
+
+isGroupMemberName = function(name)
+    return getGroupMembers()[normalizeCharacterName(name)] ~= nil
+end
+
+-- Nearby chat can only tell who is near you from friendly players'
+-- nameplates; with those turned off it can't hear anyone (see mayListen),
+-- so it says so the first time that stops someone.
+local function showNameplateHint()
+    if nameplateHintShown then return end
+    if not (GetCVar and GetCVar("nameplateShowFriendlyPlayers") == "0") then return end
+    nameplateHintShown = true
+    showTrialChatNotice("Nearby chat only reaches players TrialChat can see near you, which needs"
+        .. " friendly player nameplates (Options, Nameplates). Your group and the listeners you"
+        .. " saved hear you either way.")
+end
+
+-- Someone sent us something: they count as a listener only if they may.
+local function noteListenerIfNearby(name)
+    if mayListen(name) then
+        noteActiveListener(name)
+        return true
+    end
+    showNameplateHint()
+    return false
 end
 
 local function addNearbyMessage(sender, message, isEmote, reply)
@@ -432,7 +477,7 @@ frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
     -- header's bell mutes them; the sender still counts as active either
     -- way, so presence never depends on the sound.
     if string.sub(message, 1, #SOUND_TAG) == SOUND_TAG then
-        noteActiveListener(sender)
+        noteListenerIfNearby(sender)
         if not Nearby:IsSoundEmotesMuted() then
             TrialChatCommon.PlayReceivedSoundEmote(sender,
                 string.sub(message, #SOUND_TAG + 1))
@@ -440,9 +485,12 @@ frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
         return
     end
 
+    -- Anyone may learn you use TrialChat (the answer lets players who can
+    -- see you send you their nearby chat), but only someone near you hears
+    -- yours.
     if message == PING and channel == "WHISPER" then
         TrialChatCommon.SendAddonWhisper(PREFIX, PONG, sender)
-        noteActiveListener(sender)
+        noteListenerIfNearby(sender)
         return
     end
 
@@ -477,7 +525,7 @@ frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
     local chatText = TrialChatCommon.DecodeMessageMarkup(body)
     chatText = TrialChatCommon.NormalizeMessageMarkup(chatText)
     chatText = TrialChatCommon.AddSongLinkOwner(chatText, sender)
-    noteActiveListener(sender)
+    noteListenerIfNearby(sender)
     -- Keep the class and looks of people you chat with, for their name
     -- color and avatar later.
     TrialChatCommon.RememberClass(sender, getKnownClass(sender), true)
@@ -520,11 +568,15 @@ C_Timer.NewTicker(2, function()
         end
     end
 
+    for name, seenAt in pairs(seenNearbyAt) do
+        if now - seenAt > NEARBY_SEEN_SECONDS then
+            seenNearbyAt[name] = nil
+        end
+    end
+
     local pingBudget = PING_BUDGET
     local processed = {}
     for index = 1, 40 do
-        if pingBudget == 0 then break end
-
         local unit = "nameplate" .. index
         if UnitExists(unit) and UnitIsPlayer(unit) and not UnitIsEnemy("player", unit) then
             local name = getFullName(unit)
@@ -533,8 +585,9 @@ C_Timer.NewTicker(2, function()
                 and not processed[nameKey] then
                 rememberUnit(unit, name)
                 processed[nameKey] = true
+                seenNearbyAt[nameKey] = now
                 local lastPing = lastPingAt[nameKey]
-                if not lastPing or now - lastPing >= PING_INTERVAL then
+                if pingBudget > 0 and (not lastPing or now - lastPing >= PING_INTERVAL) then
                     TrialChatCommon.SendAddonWhisper(PREFIX, PING, name)
                     lastPingAt[nameKey] = now
                     pendingPings[nameKey] = now
