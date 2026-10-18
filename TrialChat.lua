@@ -297,6 +297,11 @@ local function showMinimapTooltip(button)
     else
         GameTooltip:AddLine("Echo to Say (/s): OFF", 0.7, 0.7, 0.7)
     end
+    if TrialChatDB.echoToParty then
+        GameTooltip:AddLine("Echo to Party (/p): ON", 0, 1, 0)
+    else
+        GameTooltip:AddLine("Echo to Party (/p): OFF", 0.7, 0.7, 0.7)
+    end
     GameTooltip:AddLine("Right-click for options.", 0.7, 0.7, 0.7)
     GameTooltip:AddLine("Drag to move this button.", 0.7, 0.7, 0.7)
     GameTooltip:Show()
@@ -683,6 +688,19 @@ sendTrialChatMessage = function(msg, reply)
             SendChatMessage(TrialChatCommon.EscapeChatPipes(msg), "SAY")
         else
             TrialChatBubbles.ShowOwnMessage(msg)
+        end
+        -- With "echo to party" on, the message also goes to the group, so
+        -- members who are elsewhere (or without TrialChat) read it there. A
+        -- raid has no party channel of its own, so it goes to the raid
+        -- instead; outside a group there is nowhere to echo it and it stays
+        -- nearby. Group chat draws no bubbles, so the TrialChat bubble is
+        -- never doubled by this one.
+        if TrialChatDB.echoToParty then
+            local chatType = IsInRaid() and "RAID"
+                or (IsInGroup() and "PARTY" or nil)
+            if chatType then
+                SendChatMessage(TrialChatCommon.EscapeChatPipes(msg), chatType)
+            end
         end
     end
 end
