@@ -306,6 +306,7 @@ local function removeMember(session, name, reason)
     local key = findMemberKey(session, name)
     local wasMember = (key ~= nil)
     if key then session.members[key] = nil end
+    if session.greetedAt then session.greetedAt[normalizeName(name)] = nil end
     -- A member is only forgotten when they leave the group on purpose or are
     -- removed from it. Disconnecting, logging out or going quiet just takes
     -- them off the online list: they stay a member, offline and reachable
@@ -401,6 +402,82 @@ local function getOwnLook()
     local sex = UnitSex("player")
     if raceFile and (sex == 2 or sex == 3) then
         return raceFile .. ":" .. sex
+    end
+end
+
+-- Your class, look and (as the creator) the group's icon go to each member
+-- once when you meet them, and again every few minutes, rather than to
+-- everyone with every heartbeat: in a big group that was most of the
+-- traffic.
+local GREETING_REFRESH_SECONDS = 300
+
+local function greetMember(session, name)
+    if not name or isSelf(name) then return end
+    session.greetedAt = session.greetedAt or {}
+    local key = normalizeName(name)
+    local at = session.greetedAt[key]
+    if at and GetTime() - at < GREETING_REFRESH_SECONDS then return end
+    session.greetedAt[key] = GetTime()
+    if playerClass then
+        sendGroupProtocol(session, "CLASS", name, playerClass)
+    end
+    if getOwnLook() then
+        sendGroupProtocol(session, "LOOK", name, getOwnLook())
+    end
+    if session.isCreator and session.icon then
+        sendGroupProtocol(session, "ICON", name, session.icon)
+    end
+end
+
+-- A hello says first which TrialChat this is and how far its history goes
+-- ("CAPS"), so a member on this version answers with packed member lists and
+-- only the history that's missing. Older versions ignore it and answer as
+-- they always have. The member answering says the same about itself, so the
+-- history going the other way is only what it's missing too.
+local PROTOCOL_VERSION = 2
+local CAPS_SECONDS = 60
+local capsFrom = {}
+
+local function getNewestTimestamp(session)
+    local history = session.history or {}
+    for index = #history, 1, -1 do
+        local entry = history[index]
+        if type(entry) == "table" and tonumber(entry.timestamp) then
+            return tonumber(entry.timestamp)
+        end
+    end
+    return 0
+end
+
+local function sendCaps(session, target)
+    sendGroupProtocol(session, "CAPS", target,
+        PROTOCOL_VERSION .. ":" .. getNewestTimestamp(session))
+end
+
+-- What a member told us before their hello (or their answer), if recent.
+local function getCaps(id, name)
+    local caps = capsFrom[id .. "\0" .. normalizeName(name)]
+    if caps and GetTime() - caps.at <= CAPS_SECONDS then return caps end
+end
+
+local function sayHello(session, target)
+    sendCaps(session, target)
+    return sendGroupProtocol(session, "HELLO", target, session.password)
+end
+
+-- Names, comma-separated, in as few messages as they fit in.
+local function sendNameList(session, kind, target, names)
+    local room = 255 - #GROUP_TAG - #kind - #session.id - 2
+    local batch = ""
+    for _, name in ipairs(names) do
+        if batch ~= "" and #batch + 1 + #name > room then
+            sendGroupProtocol(session, kind, target, batch)
+            batch = ""
+        end
+        batch = batch == "" and name or (batch .. "," .. name)
+    end
+    if batch ~= "" then
+        sendGroupProtocol(session, kind, target, batch)
     end
 end
 
@@ -541,10 +618,17 @@ local function sendHistoryEntry(session, target, entry, initialDelay)
     return chunkCount
 end
 
-sendHistoryToMember = function(session, target)
+-- since: the newest message they have (see CAPS), when they said; then only
+-- messages from that moment on go, which for someone logging back in is
+-- usually a handful instead of the newest 50.
+sendHistoryToMember = function(session, target, since)
     local entries = {}
     for index = #session.history, 1, -1 do
         local item = session.history[index]
+        if type(item) == "table" and since
+            and (tonumber(item.timestamp) or 0) < since then
+            break
+        end
         if type(item) == "table" then
             table.insert(entries, 1, item)
             if #entries >= MAX_HISTORY_SYNC_MESSAGES then break end
@@ -952,11 +1036,12 @@ local function completePendingJoin(session, sender, skipHistory)
     addMember(session, sender)
     activateGroup(session)
     sendToMembers(session, "MEMBER", selfName or UnitName("player"))
-    if getOwnLook() then
-        sendToMembers(session, "LOOK", getOwnLook())
+    for _, member in pairs(session.members) do
+        greetMember(session, member.name)
     end
     if not skipHistory then
-        sendHistoryToMember(session, sender)
+        local caps = getCaps(session.id, sender)
+        sendHistoryToMember(session, sender, caps and caps.newest)
     end
 end
 
@@ -1083,7 +1168,7 @@ startJoinAttempt = function(session, candidateIndex)
     session.candidateIndex = candidateIndex
     session.joinAttempt = (session.joinAttempt or 0) + 1
     local attempt = session.joinAttempt
-    if not sendGroupProtocol(session, "HELLO", targetName, session.password) then
+    if not sayHello(session, targetName) then
         pendingJoins[id] = nil
         notifyChange("groups", id)
         return
@@ -1095,7 +1180,7 @@ startJoinAttempt = function(session, candidateIndex)
     for retry = 1, math.floor((JOIN_ATTEMPT_SECONDS - 1) / JOIN_RETRY_SECONDS) do
         C_Timer.After(retry * JOIN_RETRY_SECONDS, function()
             if stillWaiting() then
-                sendGroupProtocol(session, "HELLO", targetName, session.password)
+                sayHello(session, targetName)
             end
         end)
     end
@@ -1212,7 +1297,7 @@ local function lookForMembers(session)
         local name = names[(first + step - 1) % #names + 1]
         if not seemsOffline(name) then
             session.helloSentAt[normalizeName(name)] = now
-            sendGroupProtocol(session, "HELLO", name, session.password)
+            sayHello(session, name)
             sent = sent + 1
             if sent == LOOK_FOR_MEMBERS_HELLOS then
                 session.lookCursor = (first + step) % #names
@@ -1992,6 +2077,16 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
         return
     end
 
+    if kind == "CAPS" then
+        local version, newest = string.match(body, "^(%d+):(%d+)$")
+        if version and tonumber(version) >= PROTOCOL_VERSION then
+            capsFrom[id .. "\0" .. normalizeName(sender)] = {
+                newest = tonumber(newest), at = GetTime(),
+            }
+        end
+        return
+    end
+
     if kind == "HELLO" then
         -- Two members logging in at the same moment each wait to be let in
         -- by the other. Whoever hears a hello first lets them in, so the two
@@ -2003,33 +2098,47 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
         end
         -- Someone the creator removed can't just reconnect and rejoin.
         if session and body == session.password and not isBanned(session, sender) then
+            local caps = getCaps(id, sender)
             addMember(session, sender)
+            if caps then
+                sendCaps(session, sender)
+            end
             sendGroupProtocol(session, "WELCOME", sender,
                 session.creatorName or (session.isCreator and selfName) or "")
-            sendGroupProtocol(session, "CLASS", sender, playerClass)
-            if session.icon then
+            greetMember(session, sender)
+            -- Any member passes the icon on, so a newcomer has it even
+            -- while the creator is away.
+            if session.icon and not session.isCreator then
                 sendGroupProtocol(session, "ICON", sender, session.icon)
             end
-            for key, member in pairs(session.members) do
-                if not namesMatch(member.name, selfName or UnitName("player"))
-                    and not namesMatch(member.name, sender) then
-                    -- Only the member list: a CLASS message is always read as
-                    -- the sender's own class, and members announce theirs.
-                    sendGroupProtocol(session, "MEMBER", sender, member.name)
+            -- Only the member list: a CLASS message is always read as the
+            -- sender's own class, and members announce theirs.
+            local others, known = {}, {}
+            for _, member in pairs(session.members) do
+                if not isSelf(member.name) and not namesMatch(member.name, sender) then
+                    others[#others + 1] = member.name
                 end
             end
             for _, memberName in pairs(session.knownMembers or {}) do
-                sendGroupProtocol(session, "KNOWN", sender, memberName)
+                known[#known + 1] = memberName
+            end
+            if caps then
+                sendNameList(session, "MEMBERS", sender, others)
+                sendNameList(session, "KNOWNS", sender, known)
+            else
+                for _, memberName in ipairs(others) do
+                    sendGroupProtocol(session, "MEMBER", sender, memberName)
+                end
+                for _, memberName in ipairs(known) do
+                    sendGroupProtocol(session, "KNOWN", sender, memberName)
+                end
             end
             -- Share the removed-member list so the newcomer rejects them too.
             for _, bannedName in pairs(session.banned or {}) do
                 sendGroupProtocol(session, "BAN", sender, bannedName)
             end
-            sendToMembers(session, "MEMBER", sender)
-            if playerClass then
-                sendToMembers(session, "CLASS", playerClass, sender)
-            end
-            sendHistoryToMember(session, sender)
+            sendToMembers(session, "MEMBER", sender, sender)
+            sendHistoryToMember(session, sender, caps and caps.newest)
         end
         return
     end
@@ -2052,10 +2161,38 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
                 end
                 addMember(session, sender)
                 sendGroupProtocol(session, "MEMBER", sender, selfName or UnitName("player"))
-                if getOwnLook() then
-                    sendGroupProtocol(session, "LOOK", sender, getOwnLook())
+                greetMember(session, sender)
+                local caps = getCaps(id, sender)
+                sendHistoryToMember(session, sender, caps and caps.newest)
+            end
+        end
+        return
+    end
+
+    if kind == "MEMBERS" or kind == "KNOWNS" then
+        local names = {}
+        for name in string.gmatch(body, "[^,]+") do names[#names + 1] = name end
+        if session and hasMember(session, sender) then
+            for _, name in ipairs(names) do
+                if kind == "MEMBERS" then
+                    local isNew = not hasMember(session, name)
+                    addMember(session, name)
+                    if isNew then greetMember(session, name) end
+                else
+                    addKnownMember(session, name)
                 end
-                sendHistoryToMember(session, sender)
+            end
+            if kind == "KNOWNS" and saveGroup then saveGroup(session) end
+        elseif pending and isJoinCandidate(pending, sender) then
+            for _, name in ipairs(names) do
+                if kind == "MEMBERS" then
+                    addMember(pending, name)
+                else
+                    addKnownMember(pending, name)
+                end
+            end
+            if kind == "MEMBERS" then
+                completePendingJoin(pending, sender)
             end
         end
         return
@@ -2063,11 +2200,14 @@ eventFrame:SetScript("OnEvent", function(_, event, prefix, message, distribution
 
     if kind == "MEMBER" then
         if session and hasMember(session, sender) then
+            local isNew = not hasMember(session, body)
             addMember(session, body)
+            if isNew then greetMember(session, body) end
         elseif session and namesMatch(body, sender) and isKnownMember(session, sender) then
             -- A known member's heartbeat: they're online, perhaps after
             -- showing offline when a whisper to them didn't get through.
             addMember(session, sender)
+            greetMember(session, sender)
         elseif pending and isJoinCandidate(pending, sender) then
             if body ~= "" then
                 addMember(pending, body)
@@ -2301,15 +2441,9 @@ C_Timer.NewTicker(MEMBER_UPDATE_INTERVAL, function()
     for _, session in pairs(activeGroups) do
         addMember(session, selfName or UnitName("player"))
         sendToMembers(session, "MEMBER", selfName or UnitName("player"))
-        if playerClass then
-            sendToMembers(session, "CLASS", playerClass)
-        end
-        if getOwnLook() then
-            sendToMembers(session, "LOOK", getOwnLook())
-        end
-        -- The creator owns the group's icon, so only it rebroadcasts it.
-        if session.isCreator and session.icon then
-            sendToMembers(session, "ICON", session.icon)
+        -- Class, look and icon only to whoever hasn't had them lately.
+        for _, member in pairs(session.members) do
+            greetMember(session, member.name)
         end
 
         local expired = {}
