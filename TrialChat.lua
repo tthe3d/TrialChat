@@ -313,7 +313,7 @@ showTrialChatNotice = function(message, isError)
     if changeHandler then
         notifyChange("notice", message, isError)
     else
-        print("|cffff7d0a[TrialChat]|r " .. message)
+        print("|cff70A2FF[TrialChat]|r " .. message)
     end
 end
 

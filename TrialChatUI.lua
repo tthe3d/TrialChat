@@ -37,10 +37,10 @@ UI.Color = {
     muted = hexColor("8b929b"),
     white = hexColor("ffffff"),
     black = hexColor("000000"),
-    accent = hexColor("e8b33f"),
-    accentHover = hexColor("f0c25a"),
-    accentText = hexColor("1a1405"),
-    accentFaint = hexColor("3a2f14"),
+    accent = hexColor("70A2FF"),
+    accentHover = hexColor("8ab4ff"),
+    accentText = hexColor("0a1020"),
+    accentFaint = hexColor("1a243a"),
     online = hexColor("5ccf7a"),
     offline = hexColor("5d636b"),
     emote = hexColor("ff7d0a"),
@@ -578,7 +578,7 @@ local BUTTON_STYLES = {
     accent = { fill = "accent", hover = "accentHover", content = "accentText" },
     -- A dashed outline, for adding things.
     dashed = { hover = "hover", content = "textSoft" },
-    -- A faint gold that fills in and brightens on hover, for accepting.
+    -- A faint blue that fills in and brightens on hover, for accepting.
     accept = {
         fill = "accentFaint", hover = "accent", content = "accent",
         hoverContent = "accentText", border = "accent", borderAlpha = 0.45,

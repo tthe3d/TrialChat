@@ -95,7 +95,7 @@ local function markGroupDeclined(id)
 end
 
 local function showNotice(message)
-    print("|cffff7d0a[TrialChat Groups]|r " .. message)
+    print("|cff70A2FF[TrialChat Groups]|r " .. message)
 end
 
 local function findMemberKey(session, name)

@@ -343,7 +343,7 @@ SlashCmdList["TRIALCHATBUBBLES"] = function(msg)
                 hideBubble(ownBubble)
             end
         end
-        print("|cffff7d0a[TrialChat]|r Group chat bubbles "
+        print("|cff70A2FF[TrialChat]|r Group chat bubbles "
             .. (TrialChatDB.groupChatBubbles and "on" or "off") .. ".")
         return
     end
@@ -352,7 +352,7 @@ SlashCmdList["TRIALCHATBUBBLES"] = function(msg)
         if not TrialChatDB.ownChatBubble and ownBubble then
             hideBubble(ownBubble)
         end
-        print("|cffff7d0a[TrialChat]|r Chat bubble over your own character "
+        print("|cff70A2FF[TrialChat]|r Chat bubble over your own character "
             .. (TrialChatDB.ownChatBubble and "on" or "off") .. ".")
         return
     end
@@ -366,6 +366,6 @@ SlashCmdList["TRIALCHATBUBBLES"] = function(msg)
             hideBubble(ownBubble)
         end
     end
-    print("|cffff7d0a[TrialChat]|r Chat bubbles "
+    print("|cff70A2FF[TrialChat]|r Chat bubbles "
         .. (TrialChatDB.chatBubbles and "on" or "off") .. ".")
 end

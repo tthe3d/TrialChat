@@ -174,10 +174,15 @@ local function getIconDisplayName(icon)
     name = strtrim(name)
     if name == "" then return key end
 
+    local blue, white = "|cff70A2FF", "|cffffffff"
     -- An icon stored as a name is its own name already; only a file id gets
-    -- the name in front of it.
-    if not tonumber(key) then return name end
-    return name .. " " .. key
+    -- the name in front of it. The brackets are blue, the text white, so the
+    -- id stands out from the name.
+    local display = blue .. "(" .. white .. name .. blue .. ")"
+    if tonumber(key) then
+        display = display .. " " .. blue .. "[" .. white .. key .. blue .. "]"
+    end
+    return display .. "|r"
 end
 
 -- The icon list sliced into rows of COLUMNS, one row per scroll box element.
