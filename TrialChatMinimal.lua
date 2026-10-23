@@ -22,8 +22,8 @@ local MIN_AREA_HEIGHT, MAX_AREA_HEIGHT = 60, 600
 -- capped where it is stored); this is only a backstop for very long
 -- sessions.
 local MAX_LINES = 2000
--- Lines per mouse wheel notch.
-local SCROLL_LINES = 2
+-- Pixels scrolled per mouse wheel notch.
+local SCROLL_PIXELS = 30
 -- Messages are pills like the conversations: as tall as them for one line,
 -- with the same rounded ends, and rounded boxes when they wrap.
 local LINE_GAP = 4
@@ -240,7 +240,7 @@ function View:CreateWindowButtons()
     controls:EnableMouse(true)
     controls:EnableMouseWheel(true)
     controls:SetScript("OnMouseWheel", function(_, delta)
-        self:Scroll(delta * SCROLL_LINES)
+        self:Scroll(delta * SCROLL_PIXELS)
     end)
     local close = self:CreateWindowButton(CLOSE_COLOR, "close", "Close chat", function()
         self:Hide()
@@ -340,6 +340,14 @@ function TrialChatMinimalView.Create(controller)
     view.chatPanel:SetBorderColor(Color.white, PANEL_LINE_ALPHA)
     view:CreateChatControls()
     view:CreateMessageArea()
+    -- A hidden text frame used to measure message heights for pixel-based
+    -- scrolling, so a wheel notch moves a fixed number of pixels instead of
+    -- skipping a whole (possibly tall) message.
+    view.measure = view.messageArea:CreateFontString(nil, "ARTWORK")
+    view.measure:SetFontObject(UI.Font.body)
+    view.measure:SetWordWrap(true)
+    view.measure:SetNonSpaceWrap(true)
+    view.measure:Hide()
 
     view.newestButton = UI.CreateButton(chat, {
         style = "hud", icon = "arrowDown", iconSize = 12, text = "Newest",
@@ -364,11 +372,11 @@ function TrialChatMinimalView.Create(controller)
     end)
     frame:SetScript("OnMouseWheel", function(_, delta)
         view:MarkChatRecent()
-        view:Scroll(delta * SCROLL_LINES)
+        view:Scroll(delta * SCROLL_PIXELS)
     end)
     chat:SetScript("OnMouseWheel", function(_, delta)
         view:MarkChatRecent()
-        view:Scroll(delta * SCROLL_LINES)
+        view:Scroll(delta * SCROLL_PIXELS)
     end)
     -- Clicking empty space in the main window unshrinks the chat.
     frame:SetScript("OnMouseUp", function(_, button)
@@ -776,7 +784,7 @@ function View:CreateComposer()
     composer:EnableMouseWheel(true)
     composer:SetScript("OnMouseWheel", function(_, delta)
         self:MarkChatRecent()
-        self:Scroll(delta * SCROLL_LINES)
+        self:Scroll(delta * SCROLL_PIXELS)
     end)
     self:DragBy(composer)
     -- A click there (not the end of a drag) starts typing.
@@ -843,7 +851,7 @@ function View:CreatePill()
     pill:EnableMouseWheel(true)
     pill:SetScript("OnMouseWheel", function(_, delta)
         self:MarkChatRecent()
-        self:Scroll(delta * SCROLL_LINES)
+        self:Scroll(delta * SCROLL_PIXELS)
     end)
     self.pills[#self.pills + 1] = pill
     return pill
@@ -1043,7 +1051,7 @@ function View:CreateMessageArea()
     area:EnableMouseWheel(true)
     area:SetScript("OnMouseWheel", function(_, delta)
         self:MarkChatRecent()
-        self:Scroll(delta * SCROLL_LINES)
+        self:Scroll(delta * SCROLL_PIXELS)
     end)
     -- Clicking empty space in the chat, like in the main window, unshrinks
     -- it; dragging still moves it.
@@ -1085,7 +1093,7 @@ function View:CreateChip()
     chip:EnableMouseWheel(true)
     chip:SetScript("OnMouseWheel", function(_, delta)
         self:MarkChatRecent()
-        view:Scroll(delta * SCROLL_LINES)
+        view:Scroll(delta * SCROLL_PIXELS)
     end)
     chip:SetFrameLevel(self.messageArea:GetFrameLevel() + 5)
     chip:Hide()
@@ -1100,6 +1108,24 @@ function View:IsFullHeight()
     return self.expanded or self.resizing == "chat"
 end
 
+-- Measures how tall a line is when wrapped at this width: the chip's text is
+-- laid out in a single frame, so this matches what LayoutLines places. The
+-- result is cached on the line so scrolling (which doesn't change the width)
+-- doesn't re-measure every line on every wheel notch.
+function View:MeasureLineHeight(line, textWidth)
+    if line.measureWidth == textWidth then
+        return line.measureHeight or LINE_MIN_HEIGHT
+    end
+    local text = self.measure
+    text:SetWidth(math.max(1, textWidth))
+    text:SetText(line.text)
+    local height = math.max(LINE_MIN_HEIGHT,
+        math.ceil(text:GetStringHeight() or 0) + 2 * LINE_PADDING_Y)
+    line.measureWidth = textWidth
+    line.measureHeight = height
+    return height
+end
+
 -- The lines stack up from the bottom of the chat window, the newest at the
 -- bottom (or the one scrolled back to), as many as fit; each background is
 -- as wide as its text. The line at the top is shown even when it only partly
@@ -1109,47 +1135,76 @@ function View:LayoutLines()
     local now = GetTime()
     local full = self:IsFullHeight()
     local count = #self.lines
-    self.scroll = clamp(self.scroll, 0, math.max(0, count - 1))
     local cap = self.chatAreaHeight
     local textWidth = math.max(40, self.chatWidth - 2 * LINE_PADDING_X)
+
+    -- Measure every scrollable line, newest first, and remember where each
+    -- sits in the content measured from the bottom (newest) up. Expired lines
+    -- aren't part of the scrollable content.
+    local chips = {}
     local y = 0
-    local shown = 0
-    local needed = 0
-    for rank = 1, count - self.scroll do
-        local line = self.lines[count - self.scroll - rank + 1]
+    for index = count, 1, -1 do
+        local line = self.lines[index]
         if not full and now - line.shownAt >= LINE_VISIBLE_SECONDS + LINE_FADE_SECONDS then
             break
         end
-        if y >= cap then break end
-        local chip = self.chips[rank] or self:CreateChip()
+        local chip = self.chips[#chips + 1] or self:CreateChip()
         setChipText(chip, line)
         UI.SetTextColor(chip.text, line.color)
         local width = math.min(math.ceil(chip.text:GetUnboundedStringWidth()) + 1, textWidth)
         chip.text:SetWidth(width)
-        local height = math.max(LINE_MIN_HEIGHT,
-            math.ceil(chip.text:GetStringHeight()) + 2 * LINE_PADDING_Y)
+        local height = self:MeasureLineHeight(line, textWidth)
         if y > 0 then y = y + LINE_GAP end
-        chip.line = line
-        local entry = line.entry
-        chip.onReplyJump = (type(entry) == "table" and entry.reply)
-            and function() self:JumpToReply(entry) end or nil
-        chip:SetSize(math.max(height, width + 2 * LINE_PADDING_X), height)
-        chip:ClearAllPoints()
-        chip:SetPoint("BOTTOMLEFT", self.messageArea, "BOTTOMLEFT", 0, y)
-        -- Where the line reaches to, for its fade along the top edge of the
-        -- area (see UpdateFade).
-        chip.top = y + height
-        chip.height = height
-        shown = rank
-        needed = chip.top
-        y = chip.top
-        if y >= cap then break end
+        local bottom = y
+        local top = bottom + height
+        y = top
+        chips[#chips + 1] = {
+            chip = chip, line = line, width = width, height = height,
+            bottom = bottom, top = top,
+        }
     end
-    for rank = shown + 1, #self.chips do
-        self.chips[rank].line = nil
-        self.chips[rank].onReplyJump = nil
-        self.chips[rank]:Hide()
+    local totalHeight = y
+
+    -- Scrolling is measured in pixels: how far the stack has been pushed down
+    -- from the bottom (the newest message). Clamp it to what the content and
+    -- the view allow, so a tall message is scrolled through bit by bit instead
+    -- of being skipped over as a whole.
+    local maxScroll = math.max(0, totalHeight - cap)
+    self.scroll = clamp(self.scroll, 0, maxScroll)
+    local scroll = self.scroll
+
+    local needed = 0
+    for _, c in ipairs(chips) do
+        local chip, line = c.chip, c.line
+        local visualBottom = c.bottom - scroll
+        local visualTop = c.top - scroll
+        -- Show the line while any of it is still inside the message area.
+        if visualTop > 0 and visualBottom < cap then
+            chip.line = line
+            local entry = line.entry
+            chip.onReplyJump = (type(entry) == "table" and entry.reply)
+                and function() self:JumpToReply(entry) end or nil
+            chip:SetSize(math.max(c.height, c.width + 2 * LINE_PADDING_X), c.height)
+            chip:ClearAllPoints()
+            chip:SetPoint("BOTTOMLEFT", self.messageArea, "BOTTOMLEFT", 0, visualBottom)
+            -- Where the line reaches to, for its fade along the top edge of the
+            -- area (see UpdateFade), in view coordinates.
+            chip.top = visualTop
+            chip.height = c.height
+            needed = math.max(needed, visualTop)
+            chip:Show()
+        else
+            chip.line = nil
+            chip.onReplyJump = nil
+            chip:Hide()
+        end
     end
+    for index = #chips + 1, #self.chips do
+        self.chips[index].line = nil
+        self.chips[index].onReplyJump = nil
+        self.chips[index]:Hide()
+    end
+
     self.neededArea = needed
     if self.chatHeightHold ~= nil then
         -- Rewrapping at the main window's new width can change how much room
@@ -1231,9 +1286,9 @@ function View:JumpToReply(entry)
     if not reply then return end
     self:MarkChatRecent()
     self:ReleaseChatHeight()
-    local lines = self.lines
-    local start = #lines + 1
-    for index = #lines, 1, -1 do
+    local lines, count = self.lines, #self.lines
+    local start = count + 1
+    for index = count, 1, -1 do
         if lines[index].entry == entry then
             start = index
             break
@@ -1241,7 +1296,18 @@ function View:JumpToReply(entry)
     end
     for index = start - 1, 1, -1 do
         if TrialChatCommon.ReplyQuotesEntry(reply, lines[index].entry) then
-            self.scroll = #lines - index
+            -- Scroll so the quoted line lands at the bottom of the view, by
+            -- the combined pixel height of everything newer than it.
+            local textWidth = math.max(40, self.chatWidth - 2 * LINE_PADDING_X)
+            local newer = count - index
+            local scrollPixels = 0
+            if newer > 0 then
+                scrollPixels = LINE_GAP * (newer - 1)
+                for j = index + 1, count do
+                    scrollPixels = scrollPixels + self:MeasureLineHeight(lines[j], textWidth)
+                end
+            end
+            self.scroll = scrollPixels
             self.newCount = 0
             self.expanded = true
             self.chatClosed = false
@@ -1272,7 +1338,10 @@ function View:AddLine(line, jumpToNewest)
         self.scroll = 0
         self.newCount = 0
     elseif self.scroll > 0 then
-        self.scroll = self.scroll + 1
+        -- A new line pushes the stack up; keep the older content in view by
+        -- scrolling down by the new line's height (plus the gap between lines).
+        local textWidth = math.max(40, self.chatWidth - 2 * LINE_PADDING_X)
+        self.scroll = self.scroll + self:MeasureLineHeight(line, textWidth) + LINE_GAP
         self.newCount = self.newCount + 1
     end
     if self.scroll == 0 then
