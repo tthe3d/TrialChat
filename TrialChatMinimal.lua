@@ -97,6 +97,7 @@ local BASE_MAIN_HEIGHT = CONTROLS_HEIGHT + 2 * ROW_GAP + PILL_HEIGHT
     + COMPOSER_HEIGHT + PADDING
 local IDLE_ALPHA = 0.45
 local RECENT_SECONDS = 7
+local RECENT_CHAT_KEEP_SECONDS = 10
 local UPDATE_SECONDS = 0.1
 local TOAST_WIDTH = 300
 local TOAST_SECONDS = 8
@@ -362,14 +363,17 @@ function TrialChatMinimalView.Create(controller)
         end
     end)
     frame:SetScript("OnMouseWheel", function(_, delta)
+        view:MarkChatRecent()
         view:Scroll(delta * SCROLL_LINES)
     end)
     chat:SetScript("OnMouseWheel", function(_, delta)
+        view:MarkChatRecent()
         view:Scroll(delta * SCROLL_LINES)
     end)
     -- Clicking empty space in the main window unshrinks the chat.
     frame:SetScript("OnMouseUp", function(_, button)
         if button == "LeftButton" and view:IsClick() then
+            view:MarkChatRecent()
             view:Expand()
         end
     end)
@@ -424,6 +428,7 @@ function View:SetupChatDrag(region, expandOnClick)
     if expandOnClick then
         region:SetScript("OnMouseUp", function(_, button)
             if button == "LeftButton" and self:IsClick() then
+                self:MarkChatRecent()
                 self:Expand()
             end
         end)
@@ -432,6 +437,7 @@ end
 
 function View:StartDrag(kind)
     self.moving = true
+    self:MarkChatRecent()
     -- While pinned, moving the chat window moves the main window instead,
     -- and the chat follows its anchor.
     local frame = (kind == "chat" and not self.pinned) and self.chat or self.frame
@@ -469,6 +475,7 @@ function View:StopDrag()
         self:SaveChatPosition()
         self:RestoreChatPosition()
     end
+    self:MarkChatRecent()
     self:UpdateFade()
 end
 
@@ -478,7 +485,12 @@ end
 function View:SetupResizeGrip(grip, mode)
     grip:SetScript("OnMouseDown", function(_, button)
         if button ~= "LeftButton" then return end
-        self.resizePressed = mode
+        -- Finish anything that was still held, then remember which grip is
+        -- being dragged. Only that grip may resize, even though every shown
+        -- frame's OnUpdate runs on every frame.
+        self:StopResizing()
+        self:MarkChatRecent()
+        self.resizeGrip = grip
         self.resizeStartX, self.resizeStartY = cursorPosition()
         self.resizeStartMainWidth = self.width
         self.resizeStartMainHeight = self.mainHeight
@@ -486,7 +498,10 @@ function View:SetupResizeGrip(grip, mode)
         self.resizeStartAreaHeight = self.chatAreaHeight
     end)
     grip:SetScript("OnUpdate", function()
-        if not self.resizePressed then return end
+        -- Every grip has an OnUpdate, and all of them run each frame, not
+        -- just the one under the cursor. The others must do nothing: without
+        -- this check both grips would resize their window at once.
+        if self.resizeGrip ~= grip then return end
         -- The mouse-up can be missed: the window can hide mid-drag. A grip
         -- still marked as held would otherwise start resizing on the next
         -- mouse move, without a click.
@@ -520,10 +535,12 @@ function View:SetupResizeGrip(grip, mode)
         end
     end)
     grip:SetScript("OnMouseUp", function(_, button)
-        if button == "LeftButton" then self:StopResizing() end
+        if button == "LeftButton" and self.resizeGrip == grip then
+            self:StopResizing()
+        end
     end)
     grip:SetScript("OnHide", function()
-        self:StopResizing()
+        if self.resizeGrip == grip then self:StopResizing() end
     end)
     grip:SetScript("OnEnter", function(button)
         GameTooltip:SetOwner(button, "ANCHOR_TOP")
@@ -550,6 +567,9 @@ function View:CreateResizer()
     resizer:SetPoint("TOPRIGHT", self.controls, "TOPRIGHT", -RESIZER_PADDING, -RESIZER_PADDING)
     -- Kept above the messages so it stays grabbable when they fill the area.
     resizer:SetFrameLevel(self.controls:GetFrameLevel() + 50)
+    resizer:SetScript("OnEnter", function()
+        self:MarkChatRecent()
+    end)
     resizer:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
     resizer:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
     resizer:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
@@ -569,7 +589,10 @@ function View:CreateResizer()
         tooltip = function()
             return self.pinned and "Unpin the chat window" or "Pin the chat window"
         end,
-        onClick = function() self:SetPinned(not self.pinned) end,
+        onClick = function()
+            self:MarkChatRecent()
+            self:SetPinned(not self.pinned)
+        end,
     })
     pin:SetPoint("RIGHT", resizer, "LEFT", -WINDOW_BUTTON_GAP, 0)
     -- White while the chat floats free, blue while it is pinned to this
@@ -606,6 +629,9 @@ function View:CreateChatControls()
         onClick = function() self:CloseChat() end,
     })
     close:SetPoint("TOPLEFT", self.chat, "TOPLEFT", 6, -4)
+    close:SetScript("OnEnter", function()
+        self:MarkChatRecent()
+    end)
     -- White at rest, blue while the cursor is on it.
     close:HookScript("OnEnter", function(button)
         UI.Tint(button.icon, Color.accentHover)
@@ -621,6 +647,9 @@ function View:CreateChatControls()
     resizer:SetSize(RESIZER_SIZE, RESIZER_SIZE)
     resizer:SetPoint("TOPRIGHT", self.chat, "TOPRIGHT", -3, -3)
     resizer:SetFrameLevel(controls:GetFrameLevel() + 10)
+    resizer:SetScript("OnEnter", function()
+        self:MarkChatRecent()
+    end)
     resizer:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
     resizer:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
     resizer:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
@@ -693,10 +722,11 @@ function View:ApplyChatResize(width, areaHeight)
 end
 
 function View:StopResizing()
-    self.resizePressed = nil
+    self.resizeGrip = nil
     if not self.resizing then return end
     local mode = self.resizing
     self.resizing = nil
+    self:MarkChatRecent()
     local settings = self.controller.GetSettings()
     if mode == "main" then
         settings.minimalWidth = self.width
@@ -742,8 +772,10 @@ function View:CreateComposer()
     composer.box:SetColor(Color.sidebar, 0.88)
     composer.box:SetBorderColor(Color.white, 0.18)
     composer:EnableMouse(true)
+    composer:HookScript("OnEnter", function() self:MarkChatRecent() end)
     composer:EnableMouseWheel(true)
     composer:SetScript("OnMouseWheel", function(_, delta)
+        self:MarkChatRecent()
         self:Scroll(delta * SCROLL_LINES)
     end)
     self:DragBy(composer)
@@ -807,8 +839,10 @@ function View:CreatePill()
         style = "hud", text = "", height = PILL_HEIGHT, radius = 13, font = UI.Font.small,
         onClick = function(button) self.controller.Select(button.key) end,
     })
+    pill:HookScript("OnEnter", function() self:MarkChatRecent() end)
     pill:EnableMouseWheel(true)
     pill:SetScript("OnMouseWheel", function(_, delta)
+        self:MarkChatRecent()
         self:Scroll(delta * SCROLL_LINES)
     end)
     self.pills[#self.pills + 1] = pill
@@ -1004,9 +1038,11 @@ function View:CreateMessageArea()
     area:SetSize(self.chatWidth, math.max(1, self.chatAreaHeight))
     -- Under the chat panel's controls, above its own background.
     area:SetFrameLevel(self.chat:GetFrameLevel() + 5)
+    area:HookScript("OnEnter", function() self:MarkChatRecent() end)
     area:EnableMouse(true)
     area:EnableMouseWheel(true)
     area:SetScript("OnMouseWheel", function(_, delta)
+        self:MarkChatRecent()
         self:Scroll(delta * SCROLL_LINES)
     end)
     -- Clicking empty space in the chat, like in the main window, unshrinks
@@ -1044,9 +1080,11 @@ function View:CreateChip()
             view.controller.ShowMessageMenu(entry, MENU_THEME)
         end
     end)
+    chip:HookScript("OnEnter", function() self:MarkChatRecent() end)
     self:SetupChatDrag(chip, false)
     chip:EnableMouseWheel(true)
     chip:SetScript("OnMouseWheel", function(_, delta)
+        self:MarkChatRecent()
         view:Scroll(delta * SCROLL_LINES)
     end)
     chip:SetFrameLevel(self.messageArea:GetFrameLevel() + 5)
@@ -1164,6 +1202,7 @@ end
 -- history is loaded (see Render), so this is a plain scroll. Scrolling back
 -- opens the chat window at full height, like clicking it does.
 function View:Scroll(lines)
+    self:MarkChatRecent()
     self:ReleaseChatHeight()
     if lines > 0 and #self.lines > 0 then
         self.expanded = true
@@ -1177,6 +1216,7 @@ function View:Scroll(lines)
 end
 
 function View:ScrollToNewest()
+    self:MarkChatRecent()
     self:ReleaseChatHeight()
     self.scroll = 0
     self.newCount = 0
@@ -1189,6 +1229,7 @@ end
 function View:JumpToReply(entry)
     local reply = type(entry) == "table" and entry.reply
     if not reply then return end
+    self:MarkChatRecent()
     self:ReleaseChatHeight()
     local lines = self.lines
     local start = #lines + 1
@@ -1224,6 +1265,7 @@ function View:AddLine(line, jumpToNewest)
         self.scroll = 0
         self.newCount = 0
     end
+    self:MarkChatRecent()
     line.shownAt = GetTime()
     self.lines[#self.lines + 1] = line
     if jumpToNewest then
@@ -1238,7 +1280,9 @@ function View:AddLine(line, jumpToNewest)
             table.remove(self.lines, 1)
         end
     end
-    self.lastLineAt = line.shownAt
+    if not (line and line.expiresAt) then
+        self.lastLineAt = line.shownAt
+    end
     self:LayoutLines()
 end
 
@@ -1248,6 +1292,7 @@ function View:Render()
     if self.resizing ~= "main" then
         self:ReleaseChatHeight()
     end
+    self:MarkChatRecent()
     local entries, format, colorFor = self.controller.GetEntries()
     local now = GetTime()
     self.lines = {}
@@ -1273,7 +1318,13 @@ end
 
 -- A line from TrialChat itself; it isn't kept in the history.
 function View:AddNotice(text, color)
-    self:AddLine({ text = text, color = color or Color.muted }, true)
+    local line = { text = text, color = color or Color.muted }
+    self:AddLine(line, true)
+    if text and (string.find(text, "skipped: message too long") or string.find(text, "Chat message limits exceeded") or string.find(text, "limits exceeded")) then
+        line.expiresAt = GetTime() + 5
+        self.lastLineAt = GetTime()
+        self:LayoutLines()
+    end
 end
 
 function View:Refresh()
@@ -1289,8 +1340,13 @@ end
 -- Clicking empty space in either window opens the chat at full height, with
 -- the conversation's history fully lit; leaving lets it fade and shrink back
 -- to fit the text, then hide.
+function View:MarkChatRecent()
+    self.chatRecentAt = GetTime()
+end
+
 function View:Expand()
     if not self.frame:IsShown() or #self.lines == 0 then return end
+    self:MarkChatRecent()
     self:ReleaseChatHeight()
     self.expanded = true
     self.chatClosed = false
@@ -1320,6 +1376,7 @@ function View:CloseChat()
     self.expanded = false
     self.scroll = 0
     self.newCount = 0
+    self.chatRecentAt = nil
     self.chat:Hide()
 end
 
@@ -1358,14 +1415,18 @@ function View:UpdateFade()
 
     local now = GetTime()
     local overChat = self:IsOverChat()
+    if overChat then self:MarkChatRecent() end
+    local chatKept = self.chatRecentAt ~= nil
+        and now - self.chatRecentAt < RECENT_CHAT_KEEP_SECONDS
     local inUse = overChat or self:IsOverMain() or self.input:HasFocus()
         or self.moving or self.resizing
     local recent = self.lastLineAt and now - self.lastLineAt < RECENT_SECONDS
     local full = self:IsFullHeight()
 
     -- Only clicking (or scrolling) opens the chat; hovering just brings it
-    -- into focus. Once you are done with it, it closes again.
-    if self.expanded and not (inUse or self.scroll > 0) then
+    -- into focus. Once you are done with it, and it hasn't been touched for a
+    -- while, it closes again.
+    if self.expanded and not (inUse or self.scroll > 0 or chatKept) then
         self:Collapse()
         full = self:IsFullHeight()
     end
@@ -1375,7 +1436,9 @@ function View:UpdateFade()
         local line = chip.line
         local alpha = 0
         if line then
-            if full then
+            if line.expiresAt and now >= line.expiresAt then
+                alpha = 0
+            elseif full then
                 alpha = 1
             else
                 local left = 1 - math.max(0,
@@ -1428,12 +1491,66 @@ function View:UpdateFade()
         area = self.chatAreaHeight
     else
         area = math.min(self.neededArea or 0, self.chatAreaHeight)
-        if overChat or self.moving or self.resizing then
+        if overChat or self.moving or self.resizing or chatKept then
             area = math.max(area, self.areaShown or 0)
+        end
+    end
+    -- If only a short-lived notice remains and it's about to expire, let it collapse
+    if not full and self.neededArea and self.neededArea > 0 and self.lines and #self.lines == 1 then
+        local l = self.lines[1]
+        if l and l.expiresAt and now + 1 >= l.expiresAt and not chatKept and not inUse and self.scroll == 0 then
+            area = math.min(self.neededArea or 0, self.chatAreaHeight)
         end
     end
     self:SetAreaShown(area)
 
+    -- Remove expired notices from the line list so the chat can roll back
+    if not self.resizing and not self.chatHeightHold then
+        local changed = false
+        for index = #self.lines, 1, -1 do
+            local line = self.lines[index]
+            if line and line.expiresAt and now >= line.expiresAt then
+                table.remove(self.lines, index)
+                changed = true
+            end
+        end
+        if changed then
+            self:LayoutLines()
+            -- Recompute area after removal
+            local limit2 = self.areaShown or 0
+            for rank, chip in ipairs(self.chips) do
+                local l = chip.line
+                local alpha = 0
+                if l and not (l.expiresAt and now >= l.expiresAt) then
+                    if full then
+                        alpha = 1
+                    else
+                        local left = 1 - math.max(0,
+                            now - l.shownAt - LINE_VISIBLE_SECONDS) / LINE_FADE_SECONDS
+                        alpha = math.max(0, left) * (LINE_ALPHA_BY_AGE[rank] or OLDEST_LINE_ALPHA)
+                    end
+                    if chip.top and chip.height and chip.top > limit2 then
+                        local low = math.max(chip.top - chip.height, limit2 - TOP_FADE_HEIGHT)
+                        local high = math.min(chip.top, limit2)
+                        if high > low then
+                            local center = (low + high) / 2
+                            alpha = alpha * clamp((limit2 - center) / TOP_FADE_HEIGHT, 0, 1)
+                        end
+                    end
+                end
+                chip:SetAlpha(alpha)
+                chip:SetShown(alpha > 0)
+            end
+            area = math.min(self.neededArea or 0, self.chatAreaHeight)
+            if overChat or self.moving or self.resizing or chatKept then
+                area = math.max(area, self.areaShown or 0)
+            end
+            self:SetAreaShown(area)
+        end
+    end
+
+    -- Touched in the last few seconds: stay on screen even if the last line
+    -- has faded out by now.
     local showChat = self.frame:IsShown() and not self.chatClosed and area > 0
     self.chat:SetShown(showChat)
 

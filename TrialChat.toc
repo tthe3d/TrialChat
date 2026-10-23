@@ -25,4 +25,5 @@ TrialChatGroupDialog.lua
 TrialChatMessages.lua
 TrialChatMinimal.lua
 TrialChatWindow.lua
+TrialChatErrorLog.lua
 TrialChatOptions.lua

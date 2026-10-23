@@ -658,6 +658,56 @@ function List:SetEntries(entries, options)
     end
 end
 
+function List:StartNoticeFade(notice)
+    if not notice or not notice.expiresAt then return end
+    local dataProvider = self.dataProvider
+    if not dataProvider then return end
+    local index = dataProvider:FindIndex(notice)
+    if not index then return end
+    local row = self.scrollBox:FindFrame(index)
+    if row and row.noticeText then
+        local duration = 1.5
+        local f = CreateFrame("Frame")
+        f:SetScript("OnUpdate", function()
+            local now = GetTime()
+            if now >= notice.expiresAt then
+                if row.noticeText and row.noticeText.SetAlpha then row.noticeText:SetAlpha(0) end
+                f:SetScript("OnUpdate", nil)
+                C_Timer.After(0.1, function()
+                    if not self.dataProvider then return end
+                    local idx = self.dataProvider:FindIndex(notice)
+                    if idx then
+                        self.dataProvider:RemoveIndex(idx)
+                        self:UpdateEmptyText()
+                        if self:IsAtBottom() then self:ScrollToBottom() end
+                    end
+                end)
+                return
+            end
+            if now >= notice.expiresAt - duration and row.noticeText and row.noticeText.SetAlpha then
+                local t = (notice.expiresAt - now) / duration
+                row.noticeText:SetAlpha(math.max(0, t))
+            elseif row.noticeText and row.noticeText.SetAlpha then
+                row.noticeText:SetAlpha(1)
+            end
+        end)
+    else
+        C_Timer.After(0.5, function()
+            if not self.dataProvider then return end
+            if GetTime() >= notice.expiresAt then
+                local idx = self.dataProvider:FindIndex(notice)
+                if idx then
+                    self.dataProvider:RemoveIndex(idx)
+                    self:UpdateEmptyText()
+                    if self:IsAtBottom() then self:ScrollToBottom() end
+                end
+            else
+                self:StartNoticeFade(notice)
+            end
+        end)
+    end
+end
+
 function List:UpdateEmptyText()
     self.emptyText:SetShown(self.dataProvider:GetSize() == 0)
 end
@@ -685,7 +735,15 @@ end
 -- A line from TrialChat itself; it isn't kept in the history.
 function List:AddNotice(text, color)
     self.state.last = nil
-    self:InsertElements({ { kind = "notice", text = text, color = color or Color.muted } }, true)
+    local notice = { kind = "notice", text = text, color = color or Color.muted }
+    if text and (string.find(text, "skipped: message too long") or string.find(text, "Chat message limits exceeded") or string.find(text, "limits exceeded")) then
+        notice.expiresAt = GetTime() + 5
+        notice.addedAt = GetTime()
+    end
+    self:InsertElements({ notice }, true)
+    if notice.expiresAt then
+        C_Timer.After(0.1, function() self:StartNoticeFade(notice) end)
+    end
 end
 
 -- Sets up the rows on screen again, so their avatars show what's known now.

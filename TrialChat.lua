@@ -7,6 +7,7 @@ local PONG = "C:PONG"
 local CLASS_TAG = "C:CLASS:"
 local MAX_MESSAGE_BYTES = 253
 local MAX_CHAT_MESSAGE_BYTES = 1000
+local CHAT_ECHO_LIMIT_BYTES = 255
 local PART_TAG = "P:"
 local NEARBY_PART_BYTES = 230
 local MAX_CHAT_HISTORY = 1000
@@ -310,6 +311,16 @@ local function printIncomingMessage(label, sender, message, isEmote, reply)
 end
 
 showTrialChatNotice = function(message, isError)
+    TrialChatDB = TrialChatDB or {}
+    TrialChatDB.errorLogs = TrialChatDB.errorLogs or {}
+    table.insert(TrialChatDB.errorLogs, {
+        text = message,
+        isError = isError and true or false,
+        time = time and time() or GetTime(),
+    })
+    if #TrialChatDB.errorLogs > 200 then
+        table.remove(TrialChatDB.errorLogs, 1)
+    end
     if changeHandler then
         notifyChange("notice", message, isError)
     else
@@ -420,6 +431,11 @@ local function createMinimapButton()
                 root:CreateTitle("TrialChat")
                 root:CreateButton("Options", function()
                     TrialChatOptions:Toggle()
+                end)
+                root:CreateButton("Error Logs", function()
+                    if TrialChatErrorLog and TrialChatErrorLog.Toggle then
+                        TrialChatErrorLog:Toggle()
+                    end
                 end)
             end)
             return
@@ -751,7 +767,12 @@ sendTrialChatMessage = function(msg, reply)
             -- The message still holds the raw shortcut (":-)" and the like)
             -- and "/say" rejects a "|" that doesn't start a valid escape, so
             -- escape bare pipes before handing it to the game.
-            SendChatMessage(TrialChatCommon.EscapeChatPipes(msg), "SAY")
+            local sayMsg = TrialChatCommon.EscapeChatPipes(msg)
+            if #sayMsg <= CHAT_ECHO_LIMIT_BYTES then
+                SendChatMessage(sayMsg, "SAY")
+            else
+                showTrialChatNotice("Echo to Say skipped: message too long for chat.", true)
+            end
         else
             TrialChatBubbles.ShowOwnMessage(msg)
         end
@@ -765,7 +786,12 @@ sendTrialChatMessage = function(msg, reply)
             local chatType = IsInRaid() and "RAID"
                 or (IsInGroup() and "PARTY" or nil)
             if chatType then
-                SendChatMessage(TrialChatCommon.EscapeChatPipes(msg), chatType)
+                local partyMsg = TrialChatCommon.EscapeChatPipes(msg)
+                if #partyMsg <= CHAT_ECHO_LIMIT_BYTES then
+                    SendChatMessage(partyMsg, chatType)
+                else
+                    showTrialChatNotice("Echo to " .. chatType .. " skipped: message too long for chat.", true)
+                end
             end
         end
     end
