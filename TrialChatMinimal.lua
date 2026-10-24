@@ -358,12 +358,14 @@ function TrialChatMinimalView.Create(controller)
     view.newestButton:Hide()
     -- Not part of the chrome, so it doesn't fade while it waits for you.
     view.inviteCard = UI.CreateInviteCard(frame, function(join) controller.AnswerInvite(join) end)
+    view:DragBy(view.inviteCard)
     view.inviteCard:SetFrameLevel(view.chrome:GetFrameLevel() + 10)
     view:PositionChat()
     view:CreateToast()
 
     local sinceUpdate = 0
     frame:SetScript("OnUpdate", function(_, elapsed)
+        view:UpdateDrag()
         sinceUpdate = sinceUpdate + elapsed
         if sinceUpdate >= UPDATE_SECONDS then
             sinceUpdate = 0
@@ -450,8 +452,30 @@ function View:StartDrag(kind)
     -- and the chat follows its anchor.
     local frame = (kind == "chat" and not self.pinned) and self.chat or self.frame
     self.moveFrame = frame
-    frame:StartMoving()
+    -- Preserve the cursor-to-frame offset ourselves. StartMoving() can make
+    -- the frame jump when the drag starts from a child region.
+    self.dragStartX, self.dragStartY = cursorPosition()
+    self.dragStartLeft = frame:GetLeft() or 0
+    self.dragStartBottom = frame:GetBottom() or 0
+    self.dragPositioned = false
     self:UpdateFade()
+end
+
+function View:UpdateDrag()
+    if not self.moving or not self.moveFrame then return end
+    if not IsMouseButtonDown("LeftButton") then
+        self:StopDrag()
+        return
+    end
+    local x, y = cursorPosition()
+    local frame = self.moveFrame
+    if not self.dragPositioned then
+        frame:ClearAllPoints()
+        self.dragPositioned = true
+    end
+    frame:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT",
+        self.dragStartLeft + x - self.dragStartX,
+        self.dragStartBottom + y - self.dragStartY)
 end
 
 -- Whether the press that is ending was a click on the window rather than a
@@ -473,6 +497,7 @@ function View:StopDrag()
     frame:StopMovingOrSizing()
     self.moveFrame = nil
     self.moving = false
+    self.dragPositioned = false
     if frame == self.frame then
         self:SavePosition()
         self:RestorePosition()
@@ -848,6 +873,7 @@ function View:CreatePill()
         onClick = function(button) self.controller.Select(button.key) end,
     })
     pill:HookScript("OnEnter", function() self:MarkChatRecent() end)
+    self:DragBy(pill)
     pill:EnableMouseWheel(true)
     pill:SetScript("OnMouseWheel", function(_, delta)
         self:MarkChatRecent()
