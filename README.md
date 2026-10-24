@@ -36,6 +36,11 @@ For instructions on adding sounds, see [Media/SoundEmotes/README.txt](Media/Soun
 - Right-click a nearby player or group member to start a TrialChat whisper. Whispers are kept separate for each character.
 - Right-click a message to reply to it or copy its text.
 
+<img width="958" height="537" alt="Screenshot 2026-10-24 at 20 43 33" src="https://github.com/user-attachments/assets/9f6f9425-f580-4853-b5a2-a1730410cef9" />. 
+<img width="358" height="333" alt="Screenshot 2026-10-24 at 20 43 53" src="https://github.com/user-attachments/assets/b1224553-f512-4f09-bd81-dff52e6f76f0" />
+
+
+
 ## 🙌 Acknowledgements
 
 A big thank-you to **Tînky** for testing and creating the emotes with me, and to **Likopotatis** for helping with the project.
