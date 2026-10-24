@@ -79,7 +79,14 @@ local function getIconSearchName(icon)
     local key = tostring(icon)
     if iconSearchNames[key] then return iconSearchNames[key] end
 
-    local name = strlower(string.gsub(getIconName(icon) or key, "[^%w]+", " "))
+    local name = strlower(string.gsub(getIconName(icon) or "", "[^%w]+", " "))
+    -- Keep the numeric file ID in the searchable text as well as the icon
+    -- name. The ID is what users paste when an icon has no useful name.
+    if name ~= "" then
+        name = name .. " " .. strlower(key)
+    else
+        name = strlower(key)
+    end
     iconSearchNames[key] = name
     return name
 end
