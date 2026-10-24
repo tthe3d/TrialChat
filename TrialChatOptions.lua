@@ -12,10 +12,15 @@ local ROW_HEIGHT = 42
 local SECTION_GAP = 24
 local FOOTER_HEIGHT = 36
 local CHECK_SIZE = 22
+local TAB_HEIGHT = 28
+local TAB_GAP = 6
+local CONTENT_TOP = HEADER_HEIGHT + TAB_HEIGHT + 8
 local CHECK_TEX = "Interface\\Buttons\\UI-CheckBox-Check"
 
 local window
 local rows = {}
+local activeTab = "general"
+local layoutTab
 
 local function setCheckboxLook(check, on)
     check.on = on and true or false
@@ -81,6 +86,7 @@ function Options:Refresh()
         UI.SetTextColor(row.label, enabled and Color.text or Color.muted)
         row:SetAlpha(enabled and 1 or 0.5)
     end
+    if layoutTab then layoutTab(activeTab) end
 end
 
 local function createWindow()
@@ -103,11 +109,7 @@ local function createWindow()
 
     local title = UI.CreateText(window, UI.Font.title, Color.white)
     title:SetPoint("TOPLEFT", window, "TOPLEFT", PADDING, -17)
-    title:SetText("Options")
-
-    local subtitle = UI.CreateText(window, UI.Font.small, Color.muted)
-    subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
-    subtitle:SetText("TrialChat settings")
+    title:SetText("Settings")
 
     local closeButton = UI.CreateButton(window, {
         style = "ghost", icon = "close", iconSize = 14, width = 28, height = 28,
@@ -117,31 +119,52 @@ local function createWindow()
     closeButton:SetPoint("TOPRIGHT", window, "TOPRIGHT", -12, -14)
 
     local divider = UI.CreateLine(window)
-    divider:SetPoint("TOPLEFT", window, "TOPLEFT", PADDING, -HEADER_HEIGHT)
-    divider:SetPoint("TOPRIGHT", window, "TOPRIGHT", -PADDING, -HEADER_HEIGHT)
+    divider:SetPoint("TOPLEFT", window, "TOPLEFT", PADDING, -CONTENT_TOP + 4)
+    divider:SetPoint("TOPRIGHT", window, "TOPRIGHT", -PADDING, -CONTENT_TOP + 4)
     divider:SetHeight(1)
 
-    -- Lays the options out from just under the header, name on the left and
-    -- checkbox on the right, anchored straight to the window the same as the
-    -- group dialog. The cursor is how far down the window each thing has
-    -- reached; a section label takes a little room of its own and an extra gap
-    -- above it once options have come before.
+    local tabButtons = {}
+    local tabNames = {
+        { key = "general", text = "General" },
+        { key = "nearby", text = "Nearby chat" },
+        { key = "minimized", text = "Minimized chat" },
+    }
+    for index, tab in ipairs(tabNames) do
+        local button = UI.CreateButton(window, {
+            style = "outline", text = tab.text, height = TAB_HEIGHT,
+        })
+        button:SetPoint("TOPLEFT", window, "TOPLEFT",
+            PADDING + (index - 1) * (WIDTH - 2 * PADDING) / #tabNames,
+            -HEADER_HEIGHT + 1)
+        button:SetWidth((WIDTH - 2 * PADDING - (TAB_GAP * (#tabNames - 1))) / #tabNames)
+        button:SetScript("OnClick", function()
+            activeTab = tab.key
+            Options:Refresh()
+        end)
+        tabButtons[tab.key] = button
+    end
+
+    -- Each tab keeps its own sections and rows. Only the selected tab is
+    -- positioned and shown, so the window height follows its contents.
     local LABEL_HEIGHT = 16
-    local cursor = 0
-    local function section(text)
-        cursor = cursor + (#rows > 0 and SECTION_GAP or 14)
+    local tabItems = { general = {}, nearby = {}, minimized = {} }
+    local currentTab = "general"
+    local function section(text, tab)
+        currentTab = tab or currentTab
         local label = UI.CreateLabel(window, text)
-        label:SetPoint("TOPLEFT", window, "TOPLEFT", PADDING + 10, -(HEADER_HEIGHT + cursor))
-        cursor = cursor + LABEL_HEIGHT
+        tabItems[currentTab][#tabItems[currentTab] + 1] = {
+            kind = "section", frame = label,
+        }
     end
     local function toggle(text, getter, setter, isEnabled)
         local row = createToggle(window, text, getter, setter, isEnabled)
-        row:SetPoint("TOPLEFT", window, "TOPLEFT", PADDING, -(HEADER_HEIGHT + cursor))
+        tabItems[currentTab][#tabItems[currentTab] + 1] = {
+            kind = "toggle", frame = row,
+        }
         row:SetWidth(WIDTH - 2 * PADDING)
-        cursor = cursor + ROW_HEIGHT
     end
 
-    section("Chat bubbles")
+    section("Chat bubbles", "general")
     toggle("Show chat bubbles",
         function() return TrialChatBubbles.IsEnabled() end,
         function() SlashCmdList["TRIALCHATBUBBLES"]("") end)
@@ -154,7 +177,7 @@ local function createWindow()
         function() SlashCmdList["TRIALCHATBUBBLES"]("groups") end,
         function() return TrialChatBubbles.IsEnabled() end)
 
-    section("Nearby chat")
+    section("Nearby chat", "nearby")
     toggle("Echo messages to Say (/s)",
         function() return TrialChatDB ~= nil and TrialChatDB.echoToSay == true end,
         function(checked)
@@ -168,7 +191,31 @@ local function createWindow()
             TrialChatDB.echoToParty = checked and true or false
         end)
 
-    section("Sound emotes")
+    section("Minimized chat", "minimized")
+    toggle("Expand chat while typing",
+        function()
+            return TrialChatDB == nil
+                or TrialChatDB.messenger == nil
+                or TrialChatDB.messenger.expandOnType ~= false
+        end,
+        function(checked)
+            TrialChatDB = TrialChatDB or {}
+            TrialChatDB.messenger = TrialChatDB.messenger or {}
+            TrialChatDB.messenger.expandOnType = checked and true or false
+        end)
+    toggle("Close chat with second Escape",
+        function()
+            return TrialChatDB == nil
+                or TrialChatDB.messenger == nil
+                or TrialChatDB.messenger.closeOnSecondEscape ~= false
+        end,
+        function(checked)
+            TrialChatDB = TrialChatDB or {}
+            TrialChatDB.messenger = TrialChatDB.messenger or {}
+            TrialChatDB.messenger.closeOnSecondEscape = checked and true or false
+        end)
+
+    section("Sound emotes", "general")
     toggle("Mute sound emotes",
         function() return TrialChatCommon.AreSoundEmotesMuted() end,
         function(checked) TrialChatCommon.SetSoundEmotesMuted(checked) end)
@@ -180,7 +227,52 @@ local function createWindow()
     footer:SetPoint("BOTTOMLEFT", window, "BOTTOMLEFT", PADDING, 14)
     footer:SetText("Settings are saved as you change them.")
 
-    window:SetHeight(HEADER_HEIGHT + cursor + FOOTER_HEIGHT)
+    layoutTab = function(tab)
+        for key, items in pairs(tabItems) do
+            local cursor = 0
+            local hasContent = false
+            for _, item in ipairs(items) do
+                if key == tab then
+                    if item.kind == "section" then
+                        cursor = cursor + (hasContent and SECTION_GAP or 14)
+                        item.frame:ClearAllPoints()
+                        item.frame:SetPoint("TOPLEFT", window, "TOPLEFT",
+                            PADDING + 10, -(CONTENT_TOP + cursor))
+                        item.frame:Show()
+                        cursor = cursor + LABEL_HEIGHT
+                    else
+                        item.frame:ClearAllPoints()
+                        item.frame:SetPoint("TOPLEFT", window, "TOPLEFT",
+                            PADDING, -(CONTENT_TOP + cursor))
+                        item.frame:Show()
+                        cursor = cursor + ROW_HEIGHT
+                    end
+                    hasContent = true
+                else
+                    item.frame:Hide()
+                end
+            end
+            if key == tab then
+                window:SetHeight(CONTENT_TOP + cursor + FOOTER_HEIGHT)
+            end
+        end
+        for key, button in pairs(tabButtons) do
+            UI.SetButtonStyle(button, key == tab and "accent" or "outline")
+        end
+    end
+
+    -- Leave a small gap between tab buttons while keeping their row inside the
+    -- existing header area.
+    for index, tab in ipairs(tabNames) do
+        local button = tabButtons[tab.key]
+        button:ClearAllPoints()
+        button:SetPoint("TOPLEFT", window, "TOPLEFT",
+            PADDING + (index - 1) * ((WIDTH - 2 * PADDING + TAB_GAP) / #tabNames),
+            -HEADER_HEIGHT + 1)
+        button:SetWidth((WIDTH - 2 * PADDING - TAB_GAP * (#tabNames - 1)) / #tabNames)
+    end
+
+    layoutTab(activeTab)
     window:SetScript("OnShow", function() Options:Refresh() end)
     window:Hide()
 end

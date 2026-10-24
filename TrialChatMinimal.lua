@@ -305,6 +305,20 @@ function TrialChatMinimalView.Create(controller)
     frame:SetMovable(true)
     frame:EnableMouse(true)
     frame:EnableMouseWheel(true)
+    view.escapeCloser = CreateFrame("Frame", "TrialChatMinimalEscapeCloser", UIParent)
+    if UISpecialFrames then
+        table.insert(UISpecialFrames, "TrialChatMinimalEscapeCloser")
+    end
+    view.escapeCloser:SetScript("OnHide", function()
+        local settings = view.controller.GetSettings()
+        if view.escapeWaiting and settings.closeOnSecondEscape ~= false then
+            view.escapeWaiting = false
+            view:CloseChat()
+        else
+            view.escapeWaiting = false
+        end
+    end)
+    view.escapeCloser:Hide()
     view:UpdateMainHeight()
     view:DragBy(frame)
     view:RestorePosition()
@@ -400,6 +414,8 @@ function TrialChatMinimalView.Create(controller)
     frame:SetScript("OnHide", function()
         view:StopDrag()
         view:StopResizing()
+        view.escapeWaiting = false
+        view.escapeCloser:Hide()
         view.input:ClearFocus()
         view.chat:Hide()
         controller.OnHidden()
@@ -858,14 +874,36 @@ function View:CreateComposer()
     end)
     input:SetScript("OnEscapePressed", function(box)
         box:ClearFocus()
+        local settings = self.controller.GetSettings()
+        if settings.closeOnSecondEscape == false then return end
+        self.escapeWaiting = true
+        -- Let this Escape finish before showing the special frame, otherwise
+        -- the same key event could close it immediately.
+        C_Timer.After(0, function()
+            if self.escapeWaiting and self.frame:IsShown()
+                and not input:HasFocus() then
+                self.escapeCloser:Show()
+            end
+        end)
     end)
     input:SetScript("OnTabPressed", function()
         self.controller.Cycle(IsShiftKeyDown() and -1 or 1)
     end)
-    local function update()
+    local function update(_, userInput)
+        if input:HasFocus() then
+            self.escapeWaiting = false
+            self.escapeCloser:Hide()
+        end
         local empty = (input:GetText() or "") == ""
         self.placeholder:SetShown(empty)
         self.hint:SetShown(empty)
+        -- Starting to type in the minimized composer opens the message area
+        -- so the text you're writing and the conversation are visible.
+        local settings = self.controller.GetSettings()
+        if userInput and not empty and input:HasFocus()
+            and settings.expandOnType ~= false then
+            self:Expand()
+        end
         self:UpdateFade()
     end
     input:HookScript("OnTextChanged", update)
@@ -1561,6 +1599,8 @@ end
 -- X on the chat window: it stays hidden until the next message, or until
 -- you click empty space to open it again.
 function View:CloseChat()
+    self.escapeWaiting = false
+    self.escapeCloser:Hide()
     self:ReleaseChatHeight()
     self.chatClosed = true
     self.expanded = false
@@ -1758,11 +1798,15 @@ end
 ---------------------------------------------------------------------------
 function View:Show()
     self.chatClosed = false
+    self.escapeWaiting = false
+    self.escapeCloser:Hide()
     self.frame:Show()
     self:UpdateFade()
 end
 
 function View:Hide()
+    self.escapeWaiting = false
+    self.escapeCloser:Hide()
     self.frame:Hide()
     self.chat:Hide()
 end

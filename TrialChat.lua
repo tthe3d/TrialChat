@@ -429,7 +429,7 @@ local function createMinimapButton()
         if mouseButton == "RightButton" then
             MenuUtil.CreateContextMenu(self, function(_, root)
                 root:CreateTitle("TrialChat")
-                root:CreateButton("Options", function()
+                root:CreateButton("Settings", function()
                     TrialChatOptions:Toggle()
                 end)
                 root:CreateButton("Error Logs", function()
