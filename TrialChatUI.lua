@@ -579,8 +579,10 @@ local BUTTON_STYLES = {
     ghost = { hover = "field", content = "muted", hoverContent = "textSoft" },
     -- Filled with the accent color.
     accent = { fill = "accent", hover = "accentHover", content = "accentText" },
-    -- A dashed outline, for adding things.
-    dashed = { hover = "hover", content = "textSoft" },
+    -- A dashed outline, for adding things; blue while hovered.
+    dashed = {
+        hover = "accent", content = "textSoft", hoverContent = "accentText",
+    },
     -- A faint blue that fills in and brightens on hover, for accepting.
     accept = {
         fill = "accentFaint", hover = "accent", content = "accent",

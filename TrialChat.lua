@@ -969,15 +969,13 @@ SlashCmdList["TRIALCHAT"] = function(msg)
     sendTrialChatMessage(msg)
 end
 
--- /reload still reloads the UI, but first tells the people around you that a
--- newer version of the addon is out, so they know to reload too.
+-- /reload reloads the UI. TrialChat's own message boxes add the reload emote
+-- before calling this, while the game's normal chat does not.
 --
 -- The reload has to run in the same input event as the typed command. C_UI.Reload
 -- is restricted to hardware events, so deferring it (for example with C_Timer)
 -- makes the client block it with "Interface action failed because of an AddOn".
 -- Sending the notice first is fine: chat messages go out before the reload.
-local RELOAD_EMOTE = "reload"
-
 local function reloadUI()
     if C_UI and C_UI.Reload then
         C_UI.Reload()
@@ -986,16 +984,13 @@ local function reloadUI()
     end
 end
 
--- Sends the TrialChat "reload" emote, then reloads the UI. The /reload slash
--- command uses the default send (nearby chat and the current group); the
--- TrialChat message box passes a send that targets the conversation being
--- viewed, so the emote lands in the same chat it would if typed there.
+-- Sends the TrialChat "reload" emote when a TrialChat message box supplies a
+-- sender, then reloads the UI. The global /reload slash command has no sender,
+-- so it only reloads the UI.
 -- The emote is sent first, synchronously, and only then does the reload start.
 function TrialChat_Reload(sendEmote)
     if sendEmote then
         sendEmote()
-    else
-        sendTrialChatMessage("/" .. RELOAD_EMOTE)
     end
     reloadUI()
 end
