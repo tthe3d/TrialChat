@@ -723,6 +723,8 @@ local function initMemberLabel(frame, element)
     if not frame.text then
         frame.text = UI.CreateLabel(frame)
         frame.text:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 16, 7)
+        frame.text:SetShadowColor(0, 0, 0, 1)
+        frame.text:SetShadowOffset(1, -1)
     end
     frame.text:SetText(string.upper(element.text))
 end
@@ -745,6 +747,8 @@ local function initMemberRow(row, element)
         row.name:SetPoint("RIGHT", row.tag, "LEFT", -6, 0)
         row.name:SetJustifyH("LEFT")
         row.name:SetWordWrap(false)
+        row.name:SetShadowColor(0, 0, 0, 1)
+        row.name:SetShadowOffset(1, -1)
         row:SetScript("OnClick", onMemberClick)
         row:SetScript("OnEnter", onMemberEnter)
         row:SetScript("OnLeave", onMemberLeave)
@@ -973,15 +977,10 @@ local function onConversationEnter(row)
     updateConversationRowHover(row)
     local element = row.element
     if not element or element.prompt or element.state ~= "offline" then return end
+    if isWhisper(element.key) then return end
     GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
-    if isWhisper(element.key) then
-        GameTooltip:SetText(element.name .. " is offline.")
-        GameTooltip:AddLine("Messages you send are delivered when they come back.",
-            1, 1, 1)
-    else
-        GameTooltip:SetText("Click to connect to " .. element.name .. ".")
-        GameTooltip:AddLine("Right-click for more options.", 1, 1, 1)
-    end
+    GameTooltip:SetText("Click to connect to " .. element.name .. ".")
+    GameTooltip:AddLine("Right-click for more options.", 1, 1, 1)
     GameTooltip:Show()
 end
 
@@ -1079,7 +1078,7 @@ local function initConversationRow(row, element)
         row.hover = UI.CreateBox(row, { radius = 8 })
         row.hover:SetColor(Color.hover)
         row.selection = UI.CreateBox(row, { radius = 8, subLevel = 1 })
-        row.selection:SetColor(Color.selected)
+        row.selection:SetColor(Color.accent)
         row.tile = UI.CreateTile(row, 28)
         row.tile:SetPoint("LEFT", row, "LEFT", 8, 0)
         row.avatar = UI.CreateAvatar(row, 28)
@@ -1110,6 +1109,8 @@ local function initConversationRow(row, element)
         row.name:SetPoint("LEFT", row.tile, "RIGHT", 10, 0)
         row.name:SetJustifyH("LEFT")
         row.name:SetWordWrap(false)
+        row.name:SetShadowColor(0, 0, 0, 1)
+        row.name:SetShadowOffset(1, -1)
         row:SetScript("OnClick", onConversationClick)
         row:SetScript("OnEnter", onConversationEnter)
         row:SetScript("OnLeave", onConversationLeave)
@@ -1149,7 +1150,7 @@ local function initConversationRow(row, element)
     end
 
     row.name:SetText(element.name)
-    UI.SetTextColor(row.name, isSelected and Color.white
+    UI.SetTextColor(row.name, isSelected and Color.accentText
         or online and Color.textSoft or Color.muted)
     row.name:ClearAllPoints()
     row.name:SetPoint("LEFT", (whisper and row.avatar or row.tile), "RIGHT", 10, 0)

@@ -424,10 +424,13 @@ local function setAvatarPerson(avatar, fullName, color, classFile)
     local unit = TrialChatCommon.FindUnit(fullName)
     local atlas, classTexture
     if not unit then
-        classTexture = classFile
-            and TrialChatCommon.GetIconTexture("ClassIcon_" .. classFile)
-        if not classTexture then
-            atlas = UI.GetRaceAtlas(TrialChatCommon.GetKnownLook(fullName))
+        -- Match the chat-log avatar: prefer the saved race portrait, then
+        -- fall back to the saved class icon when no look is available.
+        local raceFile, sex = TrialChatCommon.GetKnownLook(fullName)
+        atlas = UI.GetRaceAtlas(raceFile, sex)
+        if not atlas then
+            classTexture = classFile
+                and TrialChatCommon.GetIconTexture("ClassIcon_" .. classFile)
         end
     end
     avatar.portrait:SetShown(unit ~= nil)
