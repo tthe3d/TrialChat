@@ -6,6 +6,15 @@ local Messenger = TrialChatMessenger
 local UI = TrialChatUI
 local Color = UI.Color
 
+local function makeHeaderIconBlueOnHover(button)
+    button:HookScript("OnEnter", function(self)
+        UI.Tint(self.icon, Color.accentHover)
+    end)
+    button:HookScript("OnLeave", function(self)
+        UI.Tint(self.icon, Color.muted)
+    end)
+end
+
 local NEARBY = "nearby"
 local DEFAULT_WIDTH = 860
 local DEFAULT_HEIGHT = 540
@@ -1533,6 +1542,7 @@ local function createSidebar()
         tooltip = "Settings",
         onClick = function() TrialChatOptions:Toggle() end,
     })
+    makeHeaderIconBlueOnHover(settingsButton)
     settingsButton:SetPoint("TOPRIGHT", sidebar, "TOPRIGHT", -10, -12)
 
     searchField = UI.CreateField(sidebar, {
@@ -1617,6 +1627,7 @@ local function createHeader()
         tooltip = "Close",
         onClick = function() window:Hide() end,
     })
+    makeHeaderIconBlueOnHover(header.closeButton)
     header.closeButton:SetPoint("TOPRIGHT", main, "TOPRIGHT", -12, -16)
 
     header.minimizeButton = UI.CreateButton(main, {
@@ -1624,6 +1635,7 @@ local function createHeader()
         tooltip = "Minimal view",
         onClick = function() setMode("minimal", nil, true) end,
     })
+    makeHeaderIconBlueOnHover(header.minimizeButton)
     header.minimizeButton:SetPoint("RIGHT", header.closeButton, "LEFT", -2, 0)
 
     header.membersButton = UI.CreateButton(main, {

@@ -328,7 +328,7 @@ function TrialChatBubbles.IsEnabled(option)
 end
 
 SLASH_TRIALCHATBUBBLES1 = "/tcbubbles"
-SlashCmdList["TRIALCHATBUBBLES"] = function(msg)
+SlashCmdList["TRIALCHATBUBBLES"] = function(msg, silent)
     TrialChatDB = TrialChatDB or {}
     local option = strlower(strtrim(msg or ""))
     if option == "groups" then
@@ -343,8 +343,10 @@ SlashCmdList["TRIALCHATBUBBLES"] = function(msg)
                 hideBubble(ownBubble)
             end
         end
-        print("|cff70A2FF[TrialChat]|r Group chat bubbles "
-            .. (TrialChatDB.groupChatBubbles and "on" or "off") .. ".")
+        if not silent then
+            print("|cff70A2FF[TrialChat]|r Group chat bubbles "
+                .. (TrialChatDB.groupChatBubbles and "on" or "off") .. ".")
+        end
         return
     end
     if option == "self" then
@@ -352,8 +354,10 @@ SlashCmdList["TRIALCHATBUBBLES"] = function(msg)
         if not TrialChatDB.ownChatBubble and ownBubble then
             hideBubble(ownBubble)
         end
-        print("|cff70A2FF[TrialChat]|r Chat bubble over your own character "
-            .. (TrialChatDB.ownChatBubble and "on" or "off") .. ".")
+        if not silent then
+            print("|cff70A2FF[TrialChat]|r Chat bubble over your own character "
+                .. (TrialChatDB.ownChatBubble and "on" or "off") .. ".")
+        end
         return
     end
 
@@ -366,6 +370,8 @@ SlashCmdList["TRIALCHATBUBBLES"] = function(msg)
             hideBubble(ownBubble)
         end
     end
-    print("|cff70A2FF[TrialChat]|r Chat bubbles "
-        .. (TrialChatDB.chatBubbles and "on" or "off") .. ".")
+    if not silent then
+        print("|cff70A2FF[TrialChat]|r Chat bubbles "
+            .. (TrialChatDB.chatBubbles and "on" or "off") .. ".")
+    end
 end
