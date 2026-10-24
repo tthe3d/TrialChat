@@ -918,6 +918,11 @@ local function ensureRow(frame, index, theme)
     if not row then
         row = CreateFrame("Button", nil, frame)
         row:RegisterForClicks("LeftButtonUp")
+        row:EnableMouseWheel(true)
+        row:SetScript("OnMouseWheel", function(_, delta)
+            local handler = frame:GetScript("OnMouseWheel")
+            if handler then handler(frame, delta) end
+        end)
         row.box = UI.CreateBox(row, { radius = 6 })
         row.text = UI.CreateText(row, theme.font or UI.Font.item,
             theme.text or Color.textSoft)
@@ -953,44 +958,61 @@ function UI.ShowPopupMenu(theme, items)
 
     local itemHeight = theme.itemHeight or 24
     local padding = theme.padding or 5
+    local maxItems = theme.maxItems or #items
+    local visibleItems = math.min(maxItems, #items)
+    local firstItem = math.max(1, math.min(theme.scrollOffset or 1,
+        math.max(1, #items - visibleItems + 1)))
+    local lastItem = math.min(#items, firstItem + visibleItems - 1)
     local textWidth = 0
-    for index, item in ipairs(items) do
-        local row = ensureRow(frame, index, theme)
+    for index = firstItem, lastItem do
+        local item = items[index]
+        local rowIndex = index - firstItem + 1
+        local row = ensureRow(frame, rowIndex, theme)
         row.text:SetText(item.text)
         row.action = item.onClick
         row:Show()
         textWidth = math.max(textWidth, row.text:GetStringWidth())
     end
-    for index = #items + 1, #frame.rows do
+    for index = visibleItems + 1, #frame.rows do
         frame.rows[index]:Hide()
     end
 
     local width = textWidth + 2 * (POPUP_TEXT_INSET + padding)
     width = math.max(width, theme.minWidth or 0)
-    frame:SetSize(width, #items * itemHeight + 2 * padding)
-    for index = 1, #items do
+    frame:SetSize(width, visibleItems * itemHeight + 2 * padding)
+    for index = 1, visibleItems do
         local row = frame.rows[index]
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", frame, "TOPLEFT", padding,
             -(padding + (index - 1) * itemHeight))
         row:SetSize(width - 2 * padding, itemHeight)
     end
+    frame:EnableMouseWheel(theme.onScroll ~= nil)
+    frame:SetScript("OnMouseWheel", function(_, delta)
+        if theme.onScroll then theme.onScroll(delta) end
+    end)
 
-    -- Open where the cursor is, then nudge it back onto the screen.
-    local scale = frame:GetEffectiveScale()
-    local cursorX, cursorY = GetCursorPosition()
-    local uiLeft, uiBottom = UIParent:GetLeft() or 0, UIParent:GetBottom() or 0
-    local uiWidth, uiHeight = UIParent:GetWidth(), UIParent:GetHeight()
-    local left = cursorX / scale + 4
-    local bottom = cursorY / scale - 4 - frame:GetHeight()
-    if left + frame:GetWidth() > uiLeft + uiWidth then
-        left = uiLeft + uiWidth - frame:GetWidth()
+    -- Open where the cursor is, then nudge it back onto the screen. Keep the
+    -- existing position while a scrollable menu is being redrawn.
+    local left, bottom
+    if theme.keepPosition and frame:IsShown() then
+        left, bottom = frame:GetLeft(), frame:GetBottom()
+    else
+        local scale = frame:GetEffectiveScale()
+        local cursorX, cursorY = GetCursorPosition()
+        local uiLeft, uiBottom = UIParent:GetLeft() or 0, UIParent:GetBottom() or 0
+        local uiWidth, uiHeight = UIParent:GetWidth(), UIParent:GetHeight()
+        left = cursorX / scale + 4
+        bottom = cursorY / scale - 4 - frame:GetHeight()
+        if left + frame:GetWidth() > uiLeft + uiWidth then
+            left = uiLeft + uiWidth - frame:GetWidth()
+        end
+        if left < uiLeft then left = uiLeft end
+        if bottom + frame:GetHeight() > uiBottom + uiHeight then
+            bottom = uiBottom + uiHeight - frame:GetHeight()
+        end
+        if bottom < uiBottom then bottom = uiBottom end
     end
-    if left < uiLeft then left = uiLeft end
-    if bottom + frame:GetHeight() > uiBottom + uiHeight then
-        bottom = uiBottom + uiHeight - frame:GetHeight()
-    end
-    if bottom < uiBottom then bottom = uiBottom end
 
     frame:ClearAllPoints()
     frame:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", left, bottom)

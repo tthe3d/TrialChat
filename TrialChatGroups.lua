@@ -1724,6 +1724,7 @@ function Groups:GetConversations()
         conversations[#conversations + 1] = {
             id = id,
             name = name,
+            timestamp = session and getNewestTimestamp(session) or 0,
             state = state,
             unread = session and getUnreadCount(session) or 0,
             online = session and countMembers(session) or 0,

@@ -859,22 +859,29 @@ end
 -- groups you're connected to.
 local function getMinimalConversations()
     local conversations = {
-        { key = NEARBY, name = "Nearby", unread = nearbyUnread },
+        { key = NEARBY, name = "Nearby", unread = nearbyUnread, kind = "nearby" },
     }
-    for _, conversation in ipairs(Groups:GetConversations()) do
-        if conversation.state == "online" then
-            conversations[#conversations + 1] = {
-                key = conversation.id, name = conversation.name, unread = conversation.unread,
-            }
+    local groups = Groups:GetConversations()
+    table.sort(groups, function(left, right)
+        if left.timestamp ~= right.timestamp then
+            return (left.timestamp or 0) > (right.timestamp or 0)
         end
-    end
-    for _, conversation in ipairs(Whispers:GetConversations()) do
+        return strlower(left.name) < strlower(right.name)
+    end)
+    for _, conversation in ipairs(groups) do
         conversations[#conversations + 1] = {
             key = conversation.id, name = conversation.name, unread = conversation.unread,
+            kind = "group", timestamp = conversation.timestamp,
         }
     end
-    -- In the order you dragged them into in the full window.
-    return sortByUserOrder(conversations)
+    local whispers = Whispers:GetConversations()
+    for _, conversation in ipairs(whispers) do
+        conversations[#conversations + 1] = {
+            key = conversation.id, name = conversation.name, unread = conversation.unread,
+            kind = "whisper", timestamp = conversation.timestamp,
+        }
+    end
+    return conversations
 end
 
 local function showConversationMenu(owner, element)

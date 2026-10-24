@@ -42,6 +42,9 @@ local LINE_ALPHA_BY_AGE = { 1, 1, 0.8, 0.55 }
 local OLDEST_LINE_ALPHA = 0.35
 local PILL_HEIGHT = 26
 local PILL_GAP = 6
+local CATEGORY_NAMES = { nearby = "Nearby", group = "Groups", whisper = "Whispers" }
+local CATEGORY_ORDER = { "nearby", "group", "whisper" }
+local CATEGORY_MENU_ITEMS = 5
 -- How far the mouse has to drag the resize grip before it resizes at all.
 local RESIZE_DRAG_THRESHOLD = 3
 -- Room kept between the view's edges and the screen's when it is at its
@@ -265,8 +268,8 @@ function View:CreateWindowButtons()
 end
 
 -- controller gives the view its data and does what it asks:
--- GetSelected(), Select(key), Cycle(step), GetConversations() (Nearby and
--- connected groups as { key, name, unread }), GetEntries() (the open
+-- GetSelected(), Select(key), Cycle(step), GetConversations() (Nearby, groups
+-- and whispers as { key, name, unread, kind }), GetEntries() (the open
 -- conversation's history, how to format a message and color a name),
 -- GetName(), GetMessageLimit(), Send(text), ShowFullView(), GetSettings(),
 -- AnswerInvite(join), OnShown() and OnHidden().
@@ -274,6 +277,8 @@ function TrialChatMinimalView.Create(controller)
     local view = setmetatable({
         controller = controller, lines = {}, chips = {}, pills = {},
         scroll = 0, newCount = 0, expanded = false, chatClosed = false,
+        categoryButtons = {}, categoryMenuOffset = {},
+        lastCategoryKey = {},
         areaShown = 0, neededArea = 0,
     }, View)
 
@@ -840,12 +845,13 @@ function View:CreateComposer()
     self.hint:SetText("Tab switches")
 
     TrialChatCommon.RegisterLinkInput(input)
-    -- Like the game's chat: Enter sends and stops typing, and so does Esc.
+    -- Like the game's chat: Enter sends and keeps the composer ready for the
+    -- next message; Escape is used when you want to stop typing.
     input:SetScript("OnEnterPressed", function(box)
         local text = box:GetText()
         box:SetText("")
-        box:ClearFocus()
         self.controller.Send(text)
+        box:SetFocus()
     end)
     input:SetScript("OnEscapePressed", function(box)
         box:ClearFocus()
@@ -867,20 +873,81 @@ end
 ---------------------------------------------------------------------------
 -- Conversations
 ---------------------------------------------------------------------------
-function View:CreatePill()
-    local pill = UI.CreateButton(self.chrome, {
-        style = "hud", text = "", height = PILL_HEIGHT, radius = 13, font = UI.Font.small,
-        onClick = function(button) self.controller.Select(button.key) end,
+function View:ShowCategoryMenu(kind, button)
+    local conversations = self.controller.GetConversations()
+    local items = {}
+    for _, conversation in ipairs(conversations) do
+        if conversation.kind == kind then
+            local text = conversation.name
+            if conversation.unread and conversation.unread > 0 then
+                text = text .. "  " .. UI.ColorText(Color.accent,
+                    tostring(conversation.unread))
+            end
+            local key = conversation.key
+            items[#items + 1] = {
+                text = text,
+                onClick = function() self.controller.Select(key) end,
+            }
+        end
+    end
+    if #items == 0 then return end
+
+    local theme = {}
+    for key, value in pairs(MENU_THEME) do theme[key] = value end
+    local maxOffset = math.max(1, #items - CATEGORY_MENU_ITEMS + 1)
+    self.categoryMenuOffset[kind] = math.max(1,
+        math.min(self.categoryMenuOffset[kind] or 1, maxOffset))
+    theme.maxItems = CATEGORY_MENU_ITEMS
+    theme.scrollOffset = self.categoryMenuOffset[kind]
+    theme.keepPosition = true
+    theme.hover = Color.accent
+    theme.hoverAlpha = 1
+    theme.onScroll = function(delta)
+        self.categoryMenuOffset[kind] = math.max(1, math.min(maxOffset,
+            (self.categoryMenuOffset[kind] or 1) - delta))
+        self:ShowCategoryMenu(kind, button)
+    end
+    UI.ShowPopupMenu(theme, items)
+end
+
+function View:GetCategoryTarget(kind)
+    local conversations = self.controller.GetConversations()
+    local first
+    local selected = self.controller.GetSelected()
+    local last = self.lastCategoryKey[kind]
+    for _, conversation in ipairs(conversations) do
+        if conversation.kind == kind then
+            first = first or conversation.key
+            if conversation.key == selected then return selected end
+            if conversation.key == last then first = conversation.key end
+        end
+    end
+    return first
+end
+
+function View:CreateCategoryButton(kind)
+    local button = UI.CreateButton(self.chrome, {
+        style = "hud", text = CATEGORY_NAMES[kind], height = PILL_HEIGHT,
+        radius = 13, font = UI.Font.small,
+        onClick = function() end,
     })
-    pill:HookScript("OnEnter", function() self:MarkChatRecent() end)
-    self:DragBy(pill)
-    pill:EnableMouseWheel(true)
-    pill:SetScript("OnMouseWheel", function(_, delta)
-        self:MarkChatRecent()
-        self:Scroll(delta * SCROLL_PIXELS)
+    button.kind = kind
+    button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    button:SetScript("OnClick", function(_, mouseButton)
+        if mouseButton == "RightButton" and kind ~= "nearby" then
+            local target = self:GetCategoryTarget(kind)
+            if target then self.controller.Select(target) end
+            self:ShowCategoryMenu(kind, button)
+        elseif mouseButton == "LeftButton" then
+            local target = kind == "nearby" and "nearby"
+                or self:GetCategoryTarget(kind)
+            if target then self.controller.Select(target) end
+        end
     end)
-    self.pills[#self.pills + 1] = pill
-    return pill
+    button:HookScript("OnEnter", function() self:MarkChatRecent() end)
+    self:DragBy(button)
+    self.categoryButtons[kind] = button
+    return button
 end
 
 -- The conversations flow into rows under the toolbar, using extra vertical
@@ -888,44 +955,31 @@ end
 function View:UpdateConversations()
     local selected = self.controller.GetSelected()
     local conversations = self.controller.GetConversations()
-    local count = #conversations
-    local replyHeight = self.reply and (REPLY_BAR_HEIGHT + ROW_GAP) or 0
-    local extraHeight = (self.mainHeight or BASE_MAIN_HEIGHT) - BASE_MAIN_HEIGHT
-    local maxRows = 1 + math.floor(math.max(0, extraHeight) / (PILL_HEIGHT + ROW_GAP))
-    if maxRows < 1 then maxRows = 1 end
-    local x = 0
-    local y = 0
-    local row = 0
-    local shown = 0
-    for index = 1, count do
-        local conversation = conversations[index]
-        local pill = self.pills[index] or self:CreatePill()
-        pill.key = conversation.key
-        local text = conversation.name
-        if conversation.unread > 0 then
-            text = text .. "  " .. UI.ColorText(Color.accent, tostring(conversation.unread))
-        end
-        pill:SetLabel(text)
-        UI.SetButtonStyle(pill, conversation.key == selected and "accent" or "hud")
-        local width = pill:GetWidth()
-        if x > 0 and x + width > self.width then
-            row = row + 1
-            if row >= maxRows then
-                pill:Hide()
-                break
-            end
-            x = 0
-            y = row * (PILL_HEIGHT + ROW_GAP)
-        end
-        pill:ClearAllPoints()
-        pill:SetPoint("TOPLEFT", self.frame, "TOPLEFT",
-            PADDING + x, -(CONTROLS_HEIGHT + ROW_GAP + y))
-        pill:Show()
-        x = x + width + PILL_GAP
-        shown = index
+    local selectedKind
+    local unread = { nearby = 0, group = 0, whisper = 0 }
+    for _, conversation in ipairs(conversations) do
+        if conversation.key == selected then selectedKind = conversation.kind end
+        unread[conversation.kind] = (unread[conversation.kind] or 0)
+            + (conversation.unread or 0)
     end
-    for index = shown + 1, #self.pills do
-        self.pills[index]:Hide()
+    if selectedKind == "group" or selectedKind == "whisper" then
+        self.lastCategoryKey[selectedKind] = selected
+    end
+    for index, kind in ipairs(CATEGORY_ORDER) do
+        local button = self.categoryButtons[kind] or self:CreateCategoryButton(kind)
+        local text = CATEGORY_NAMES[kind]
+        if unread[kind] > 0 then
+            text = text .. "  " .. UI.ColorText(Color.accent, tostring(unread[kind]))
+        end
+        button:SetLabel(text)
+        UI.SetButtonStyle(button,
+            selectedKind == kind and "accent" or "hud")
+        button:SetWidth((self.width - 2 * PILL_GAP) / 3)
+        button:ClearAllPoints()
+        button:SetPoint("TOPLEFT", self.frame, "TOPLEFT",
+            PADDING + (index - 1) * (button:GetWidth() + PILL_GAP),
+            -(CONTROLS_HEIGHT + ROW_GAP))
+        button:Show()
     end
     self:UpdateInvite()
     self:LayoutLines()
@@ -1492,8 +1546,8 @@ function View:IsOverMain()
         or self.composer:IsMouseOver() then
         return true
     end
-    for _, pill in ipairs(self.pills) do
-        if pill:IsShown() and pill:IsMouseOver() then return true end
+    for _, button in pairs(self.categoryButtons) do
+        if button:IsShown() and button:IsMouseOver() then return true end
     end
     local card = self.inviteCard
     if card:IsShown() and card:IsMouseOver() then return true end
