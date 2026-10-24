@@ -54,6 +54,7 @@ local RESIZE_DRAG_THRESHOLD = 3
 local SCREEN_MARGIN = 64
 local ROW_GAP = 8
 local COMPOSER_HEIGHT = 38
+local MIN_COMPOSER_INPUT_WIDTH = 160
 -- A reply shown above the message box: who and what is being answered.
 local REPLY_BAR_HEIGHT = 28
 
@@ -726,6 +727,7 @@ function View:SetMainWidth(width)
     width = resizeWidth(width)
     self.width = width
     self.frame:SetWidth(width + 2 * PADDING)
+    self:UpdateComposerLabel()
 end
 
 function View:SetChatWidth(width)
@@ -843,6 +845,7 @@ function View:CreateComposer()
     self.hint = UI.CreateText(composer, UI.Font.small, Color.muted)
     self.hint:SetPoint("RIGHT", composer, "RIGHT", -16, 0)
     self.hint:SetText("Tab switches")
+    self:UpdateComposerLabel()
 
     TrialChatCommon.RegisterLinkInput(input)
     -- Like the game's chat: Enter sends and keeps the composer ready for the
@@ -868,6 +871,44 @@ function View:CreateComposer()
     input:HookScript("OnTextChanged", update)
     input:HookScript("OnEditFocusGained", update)
     input:HookScript("OnEditFocusLost", update)
+end
+
+-- Keep the recipient label from running into the input's placeholder or hint.
+-- It is recalculated after refreshes and width changes so resizing can reveal
+-- more of the conversation name again.
+function View:UpdateComposerLabel()
+    if not self.label or not self.composer or not self.hint then return end
+    local maxWidth = math.max(1, self.composer:GetWidth()
+        - 42 - MIN_COMPOSER_INPUT_WIDTH)
+    local text = "To " .. (self.controller.GetName() or "")
+    self.label:SetWordWrap(false)
+    self.label:SetText(text)
+    local function textWidth()
+        return self.label.GetUnboundedStringWidth
+            and self.label:GetUnboundedStringWidth()
+            or self.label:GetStringWidth()
+    end
+    if textWidth() <= maxWidth then
+        self.label:SetWidth(textWidth())
+        return
+    end
+
+    local low, high = 0, #text
+    while low < high do
+        local middle = math.ceil((low + high) / 2)
+        self.label:SetText(string.sub(text, 1, middle) .. "...")
+        if textWidth() <= maxWidth then
+            low = middle
+        else
+            high = middle - 1
+        end
+    end
+    if low == 0 then
+        self.label:SetText("...")
+    else
+        self.label:SetText(string.sub(text, 1, low) .. "...")
+    end
+    self.label:SetWidth(math.min(maxWidth, textWidth()))
 end
 
 ---------------------------------------------------------------------------
@@ -1477,7 +1518,7 @@ function View:AddNotice(text, color)
 end
 
 function View:Refresh()
-    self.label:SetText("To " .. self.controller.GetName())
+    self:UpdateComposerLabel()
     self.input:SetMaxLetters(self.controller.GetMessageLimit())
     self:UpdateConversations()
     self:Render()
