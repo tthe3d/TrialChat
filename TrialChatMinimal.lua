@@ -1815,7 +1815,18 @@ function View:Hide()
 end
 
 function View:IsShown() return self.frame:IsShown() end
-function View:FocusInput() self.input:SetFocus() end
+function View:FocusInput()
+    -- Opening the composer must restore the whole minimized chat even when
+    -- inactivity has already collapsed the message area.
+    self:Show()
+    self.chatClosed = false
+    self.expanded = true
+    self:MarkChatRecent()
+    self:ReleaseChatHeight()
+    self:LayoutLines()
+    self.input:SetFocus()
+    self:UpdateFade()
+end
 
 function View:SetPinned(pinned)
     self.pinned = pinned and true or false
