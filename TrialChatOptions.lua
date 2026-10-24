@@ -250,6 +250,16 @@ local function createWindow()
         }
         row:SetWidth(math.max(1, viewport:GetWidth() - PADDING))
     end
+    local function action(text, callback)
+        local button = UI.CreateButton(content, {
+            style = "outline", text = text, height = ROW_HEIGHT - 6,
+            onClick = callback,
+        })
+        tabItems[currentTab][#tabItems[currentTab] + 1] = {
+            kind = "action", frame = button,
+        }
+        button:SetWidth(math.max(1, viewport:GetWidth() - PADDING))
+    end
 
     section("Chat bubbles", "general")
     toggle("Show chat bubbles",
@@ -301,6 +311,27 @@ local function createWindow()
             TrialChatDB.messenger = TrialChatDB.messenger or {}
             TrialChatDB.messenger.closeOnSecondEscape = checked and true or false
         end)
+    toggle("Show notification popups",
+        function()
+            return TrialChatDB == nil
+                or TrialChatDB.messenger == nil
+                or TrialChatDB.messenger.showNotifications ~= false
+        end,
+        function(checked)
+            if TrialChatMessenger and TrialChatMessenger.SetNotificationPopups then
+                TrialChatMessenger:SetNotificationPopups(checked)
+            else
+                TrialChatDB = TrialChatDB or {}
+                TrialChatDB.messenger = TrialChatDB.messenger or {}
+                TrialChatDB.messenger.showNotifications = checked and true or false
+            end
+        end)
+    action("Move notification popup", function()
+        if TrialChatMessenger and TrialChatMessenger.BeginToastPlacement then
+            Options:Hide()
+            TrialChatMessenger:BeginToastPlacement()
+        end
+    end)
 
     section("Sound emotes", "general")
     toggle("Mute sound emotes",
@@ -334,7 +365,7 @@ local function createWindow()
                             PADDING, -cursor)
                         item.frame:Show()
                         item.frame:SetWidth(math.max(1, content:GetWidth() - PADDING))
-                        cursor = cursor + ROW_HEIGHT
+                        cursor = cursor + (item.kind == "action" and ROW_HEIGHT - 6 or ROW_HEIGHT)
                     end
                     hasContent = true
                 else

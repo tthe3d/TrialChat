@@ -104,6 +104,9 @@ local RECENT_SECONDS = 7
 local RECENT_CHAT_KEEP_SECONDS = 10
 local UPDATE_SECONDS = 0.1
 local TOAST_WIDTH = 300
+local TOAST_MIN_WIDTH, TOAST_MAX_WIDTH = 220, 600
+local TOAST_MIN_HEIGHT, TOAST_MAX_HEIGHT = 70, 320
+local TOAST_BASE_HEIGHT = 80
 local TOAST_SECONDS = 8
 local DEFAULT_X, DEFAULT_Y = 40, 300
 
@@ -1914,10 +1917,15 @@ end
 function View:CreateToast()
     local toast = CreateFrame("Button", "TrialChatToast", UIParent)
     self.toast = toast
-    toast:SetWidth(TOAST_WIDTH)
-    toast:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -24, -230)
+    local settings = self.controller.GetSettings()
+    toast:SetWidth(clamp(tonumber(settings.toastWidth) or TOAST_WIDTH,
+        TOAST_MIN_WIDTH, TOAST_MAX_WIDTH))
     toast:SetFrameStrata("HIGH")
+    toast:SetClampedToScreen(true)
+    toast:SetMovable(true)
+    toast:RegisterForDrag("LeftButton")
     toast:RegisterForClicks("LeftButtonUp")
+    local selfView = self
     toast.box = UI.CreateBox(toast, { radius = 10, border = true })
     toast.box:SetColor(Color.window, 0.92)
     toast.box:SetBorderColor(Color.white, 0.12)
@@ -1928,7 +1936,11 @@ function View:CreateToast()
     toast.count:SetPoint("LEFT", toast.title, "RIGHT", 8, 0)
     toast.close = UI.CreateButton(toast, {
         style = "ghost", icon = "close", iconSize = 12, width = 24, height = 24,
-        onClick = function() toast:Hide() end,
+        onClick = function()
+            toast.placement = false
+            toast:SetFrameStrata("HIGH")
+            toast:Hide()
+        end,
     })
     toast.close:SetPoint("TOPRIGHT", toast, "TOPRIGHT", -8, -8)
     toast.text = UI.CreateText(toast, UI.Font.body)
@@ -1940,29 +1952,180 @@ function View:CreateToast()
     toast.hint = UI.CreateText(toast, UI.Font.small, Color.muted)
     toast.hint:SetPoint("TOPLEFT", toast.text, "BOTTOMLEFT", 0, -6)
 
-    toast:SetScript("OnClick", function() self:Reply() end)
+    toast.resizeGrip = CreateFrame("Button", nil, toast)
+    toast.resizeGrip:SetSize(14, 14)
+    toast.resizeGrip:SetPoint("BOTTOMRIGHT", toast, "BOTTOMRIGHT", -3, 3)
+    toast.resizeGrip:SetFrameLevel(toast:GetFrameLevel() + 10)
+    toast.resizeGrip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+    toast.resizeGrip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+    toast.resizeGrip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+    UI.Tint(toast.resizeGrip:GetNormalTexture(), Color.white)
+    UI.Tint(toast.resizeGrip:GetHighlightTexture(), Color.accentHover)
+    UI.Tint(toast.resizeGrip:GetPushedTexture(), Color.accent)
+    toast.resizeGrip:Hide()
+
+    local resizing = false
+    local resizeStartX, resizeStartY, resizeStartWidth, resizeStartLeft, resizeStartTop
+    local stopResizing = function()
+        if not resizing then return end
+        resizing = false
+        local resizeSettings = selfView.controller.GetSettings()
+        resizeSettings.toastX = toast:GetLeft()
+        resizeSettings.toastY = toast:GetBottom()
+        resizeSettings.toastWidth = toast:GetWidth()
+        resizeSettings.toastHeight = toast:GetHeight()
+        selfView:UpdateToastLayout()
+        resizeSettings.toastWidth = toast:GetWidth()
+        resizeSettings.toastHeight = toast:GetHeight()
+        resizeSettings.toastX = toast:GetLeft()
+        resizeSettings.toastY = toast:GetBottom()
+    end
+    toast.resizeGrip:SetScript("OnMouseDown", function(_, button)
+        if button ~= "LeftButton" or not toast.placement then return end
+        toast:StopMovingOrSizing()
+        resizing = true
+        resizeStartX, resizeStartY = cursorPosition()
+        resizeStartWidth = toast:GetWidth()
+        resizeStartLeft = toast:GetLeft()
+        resizeStartTop = toast:GetTop()
+    end)
+    toast.resizeGrip:SetScript("OnMouseUp", function(_, button)
+        if button == "LeftButton" then stopResizing() end
+    end)
+    toast.resizeGrip:SetScript("OnUpdate", function()
+        if not resizing then return end
+        if not IsMouseButtonDown("LeftButton") then
+            stopResizing()
+            return
+        end
+        local cursorX, cursorY = cursorPosition()
+        local width = clamp(resizeStartWidth + cursorX - resizeStartX,
+            TOAST_MIN_WIDTH, TOAST_MAX_WIDTH)
+        -- The top edge stays fixed while the bottom-right grip follows the
+        -- cursor, so dragging the bottom edge down makes the popup taller.
+        local height = clamp(resizeStartTop - cursorY,
+            TOAST_MIN_HEIGHT, TOAST_MAX_HEIGHT)
+        toast:SetWidth(width)
+        toast:SetHeight(height)
+        toast:ClearAllPoints()
+        toast:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT",
+            resizeStartLeft, resizeStartTop - height)
+        selfView:UpdateToastTextScale()
+    end)
+
+    toast:SetScript("OnDragStart", function(self)
+        self:StartMoving()
+    end)
+    toast:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        local settings = selfView.controller.GetSettings()
+        settings.toastX = self:GetLeft()
+        settings.toastY = self:GetBottom()
+        self:ClearAllPoints()
+        self:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT",
+            settings.toastX, settings.toastY)
+    end)
+    toast:SetScript("OnClick", function()
+        if toast.placement then
+            toast.placement = false
+            toast.resizeGrip:Hide()
+            toast:SetFrameStrata("HIGH")
+            toast:Hide()
+            return
+        end
+        self:Reply()
+    end)
     toast:SetScript("OnUpdate", function()
         if GetTime() > (toast.hideAt or 0) and not toast:IsMouseOver() then
             toast:Hide()
         end
     end)
     toast:Hide()
+    self:UpdateToastLayout()
+    self:PositionToast()
+end
+
+function View:UpdateToastLayout()
+    if not self.toast then return end
+    local toast = self.toast
+    self:UpdateToastTextScale()
+    local naturalHeight = math.ceil(14 + toast.title:GetStringHeight() + 8
+        + toast.text:GetStringHeight() + 6 + toast.hint:GetStringHeight() + 14)
+    local settings = self.controller.GetSettings()
+    local savedHeight = tonumber(settings.toastHeight)
+    toast:SetHeight(savedHeight
+        and clamp(savedHeight, TOAST_MIN_HEIGHT, TOAST_MAX_HEIGHT)
+        or naturalHeight)
+    self:PositionToast()
+end
+
+function View:UpdateToastTextScale()
+    if not self.toast then return end
+    local toast = self.toast
+    local widthScale = toast:GetWidth() / TOAST_WIDTH
+    local heightScale = toast:GetHeight() / TOAST_BASE_HEIGHT
+    local scale = clamp(math.min(widthScale, heightScale), 0.7, 1.15)
+    toast.text:SetWidth(math.max(100, toast:GetWidth() - 32))
+    if toast.title.SetTextHeight then
+        toast.title:SetTextHeight(math.max(9, math.floor(12 * scale + 0.5)))
+        toast.count:SetTextHeight(math.max(8, math.floor(11 * scale + 0.5)))
+        toast.text:SetTextHeight(math.max(10, math.floor(14 * scale + 0.5)))
+        toast.hint:SetTextHeight(math.max(8, math.floor(11 * scale + 0.5)))
+    end
+end
+
+function View:PositionToast()
+    if not self.toast then return end
+    local settings = self.controller.GetSettings()
+    local parentWidth, parentHeight = UIParent:GetSize()
+    local width, height = self.toast:GetSize()
+    local x = tonumber(settings.toastX)
+    local y = tonumber(settings.toastY)
+    if not x then x = parentWidth - width - 24 end
+    if not y then y = parentHeight - 230 - height end
+    x = clamp(x, 0, math.max(0, parentWidth - width))
+    y = clamp(y, 0, math.max(0, parentHeight - height))
+    self.toast:ClearAllPoints()
+    self.toast:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", x, y)
+end
+
+function View:BeginToastPlacement()
+    if not self.toast then return end
+    local toast = self.toast
+    toast:SetFrameStrata("DIALOG")
+    toast.placement = true
+    toast.key = nil
+    toast.title:SetText("Notification popup")
+    toast.count:SetText("")
+    toast.text:SetText("Drag this popup to choose where notifications appear.")
+    UI.SetTextColor(toast.text, Color.text)
+    toast.hint:SetText("Click the popup when finished")
+    toast.resizeGrip:Show()
+    self:UpdateToastLayout()
+    self:PositionToast()
+    toast.hideAt = math.huge
+    toast:Show()
 end
 
 -- entry is the message that came in for conversation key, which has unread
 -- messages; format and colorFor are as for the conversation's history.
 function View:ShowToast(key, name, unread, entry, format, colorFor)
+    local settings = self.controller.GetSettings()
+    if settings.showNotifications == false then return end
     local line = self:MakeLine(entry, format, colorFor)
     if not line then return end
     local toast = self.toast
+    toast.placement = false
+    toast:SetFrameStrata("HIGH")
+    toast.resizeGrip:Hide()
     toast.key = key
     toast.title:SetText(name)
     toast.count:SetText(unread > 1 and (unread .. " new") or "")
     toast.text:SetText(line.text)
     UI.SetTextColor(toast.text, line.color)
     toast.hint:SetText(getReplyHint())
-    toast:SetHeight(math.ceil(14 + toast.title:GetStringHeight() + 8
-        + toast.text:GetStringHeight() + 6 + toast.hint:GetStringHeight() + 14))
+    self:UpdateToastLayout()
+    self:PositionToast()
     toast.hideAt = GetTime() + TOAST_SECONDS
     toast:Show()
 end

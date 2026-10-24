@@ -2241,6 +2241,20 @@ function Messenger:IsShown()
     return isViewShown()
 end
 
+function Messenger:BeginToastPlacement()
+    ensureMinimal():BeginToastPlacement()
+end
+
+function Messenger:SetNotificationPopups(enabled)
+    local settings = getSettings()
+    settings.showNotifications = enabled and true or false
+    if not settings.showNotifications and minimal and minimal.toast then
+        minimal.toast.placement = false
+        minimal.toast:SetFrameStrata("HIGH")
+        minimal.toast:Hide()
+    end
+end
+
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("PLAYER_LOGOUT")
