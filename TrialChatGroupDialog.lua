@@ -14,8 +14,17 @@ local FIELD_HEIGHT = 32
 local FIELD_GAP = 14
 local BUTTON_HEIGHT = 32
 local ICON_BUTTON_SIZE = 72
+local CHOOSER_WIDTH = WIDTH
+local CHOOSER_HEIGHT = 220
+local CHOOSER_TILE_SIZE = 72
+local CHOOSER_BUTTON_WIDTH = 130
+local CHOOSER_BUTTON_HEIGHT = 128
+local CHOOSER_BUTTON_GAP = 20
+local CREATE_ICON = 135897
+local JOIN_ICON = 135889
 
 local dialog
+local chooser
 
 local function getVisibleFields()
     local fields = {}
@@ -238,6 +247,87 @@ local function createDialog()
         end
     end)
     dialog:Hide()
+end
+
+local function createChooserButton(parent, icon, label, onClick)
+    local button = CreateFrame("Button", nil, parent)
+    button:SetSize(CHOOSER_BUTTON_WIDTH, CHOOSER_BUTTON_HEIGHT)
+    button:RegisterForClicks("LeftButtonUp")
+
+    button.tile = UI.CreateTile(button, CHOOSER_TILE_SIZE)
+    button.tile:SetPoint("TOP", button, "TOP", 0, 0)
+    button.tile:SetLook(Color.tile, Color.textSoft, nil, nil)
+    button.tile:SetTexture(icon)
+    button.tile:EnableMouse(false)
+
+    button.label = UI.CreateText(button, UI.Font.item, Color.textSoft)
+    button.label:SetPoint("TOP", button.tile, "BOTTOM", 0, -12)
+    button.label:SetText(label)
+    button.label:SetJustifyH("CENTER")
+    button.label:SetWordWrap(false)
+
+    button:SetScript("OnEnter", function(self)
+        self.tile.box:SetColor(Color.hover)
+        UI.SetTextColor(self.label, Color.accentHover)
+    end)
+    button:SetScript("OnLeave", function(self)
+        self.tile.box:SetColor(Color.tile)
+        UI.SetTextColor(self.label, Color.textSoft)
+    end)
+    button:SetScript("OnClick", onClick)
+    return button
+end
+
+local function createChooser()
+    chooser = CreateFrame("Frame", "TrialChatGroupChooserFrame", UIParent)
+    chooser:SetSize(CHOOSER_WIDTH, CHOOSER_HEIGHT)
+    chooser:SetPoint("CENTER", UIParent, "CENTER", 0, 80)
+    chooser:SetFrameStrata("DIALOG")
+    chooser:SetFrameLevel(200)
+    chooser:SetClampedToScreen(true)
+    chooser:EnableMouse(true)
+    chooser:SetMovable(true)
+    chooser:RegisterForDrag("LeftButton")
+    chooser:SetScript("OnDragStart", chooser.StartMoving)
+    chooser:SetScript("OnDragStop", chooser.StopMovingOrSizing)
+    chooser.box = UI.CreateBox(chooser, { radius = 10, border = true })
+    chooser.box:SetColor(Color.window)
+    chooser.box:SetBorderColor(Color.outline)
+    if UISpecialFrames then
+        table.insert(UISpecialFrames, "TrialChatGroupChooserFrame")
+    end
+
+    chooser.title = UI.CreateText(chooser, UI.Font.title)
+    chooser.title:SetPoint("TOPLEFT", chooser, "TOPLEFT", PADDING, -20)
+    chooser.title:SetText("Create or join a group")
+
+    chooser.close = UI.CreateButton(chooser, {
+        style = "ghost", icon = "close", iconSize = 12, width = 28, height = 28,
+        tooltip = "Close", onClick = function() chooser:Hide() end,
+    })
+    chooser.close:SetPoint("TOPRIGHT", chooser, "TOPRIGHT", -12, -12)
+
+    local create = createChooserButton(chooser, CREATE_ICON, "Create a group",
+        function()
+            chooser:Hide()
+            TrialChatGroups:ShowDialog("create")
+        end)
+    create:SetPoint("TOP", chooser, "TOP", -(CHOOSER_BUTTON_WIDTH + CHOOSER_BUTTON_GAP) / 2, -62)
+
+    local join = createChooserButton(chooser, JOIN_ICON, "Join a group",
+        function()
+            chooser:Hide()
+            TrialChatGroups:ShowDialog("join")
+        end)
+    join:SetPoint("TOP", chooser, "TOP", (CHOOSER_BUTTON_WIDTH + CHOOSER_BUTTON_GAP) / 2, -62)
+
+    chooser:Hide()
+end
+
+function TrialChatGroupDialog.ShowChooser()
+    if not chooser then createChooser() end
+    chooser:Show()
+    chooser:Raise()
 end
 
 -- mode is "create" or "join"; preset ({ name, password, memberName }) fills

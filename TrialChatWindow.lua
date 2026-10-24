@@ -1177,15 +1177,8 @@ local function initConversationRow(row, element)
     end
 end
 
-local function showCreateMenu(owner)
-    MenuUtil.CreateContextMenu(owner, function(_, root)
-        root:CreateButton("Create a group", function()
-            Groups:ShowDialog("create")
-        end)
-        root:CreateButton("Join a group", function()
-            Groups:ShowDialog("join")
-        end)
-    end)
+local function showCreateMenu()
+    TrialChatGroupDialog.ShowChooser()
 end
 
 ---------------------------------------------------------------------------
@@ -1579,7 +1572,7 @@ local function createSidebar()
     local createButton = UI.CreateButton(sidebar, {
         style = "dashed", icon = "plus", iconSize = 15, text = "Create or join a group",
         height = 38, centered = true,
-        onClick = function(self) showCreateMenu(self) end,
+        onClick = showCreateMenu,
     })
     createButton:SetPoint("BOTTOMLEFT", sidebar, "BOTTOMLEFT", 12, 12)
     createButton:SetPoint("BOTTOMRIGHT", sidebar, "BOTTOMRIGHT", -12, 12)
